@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from exporters.large_jms import ATHENA_COMMIT, read_config, source_record
+from exporters.calibdata import read_config, source_record
+from exporters.large_jms import ATHENA_COMMIT
 from exporters.rootdata import export_histogram
 
 CALIB_AREA = "CalibArea-08"
