@@ -10,10 +10,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 label=${1:?pass a new build name}
 core=${2:-core-precision-002}
 lwtnn_build=${3:-portable-lwtnn-001}
-if (( $# > 5 )); then
-  echo "Supply at most two optional provider build choices" >&2
-  exit 2
-fi
 jets_candidate_choices=()
 jets_candidate_defines=()
 for choice in "${@:4}"; do
@@ -24,6 +20,7 @@ for choice in "${@:4}"; do
     rng-cache) jets_candidate_defines+=(-DJETS_RNG_CACHE) ;;
     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
     uncertainty-batch) jets_candidate_defines+=(-DJETS_UNCERTAINTY_BATCH) ;;
+    fast-variable-flow) jets_candidate_defines+=(-DJETS_FAST_VARIABLE_FLOW) ;;
     *) echo "Unknown provider build choice: $choice" >&2; exit 2 ;;
   esac
   jets_candidate_choices+=("$choice")
