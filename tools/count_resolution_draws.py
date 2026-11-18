@@ -31,7 +31,7 @@ def main(original: Path, histogram: Path, output: Path, provider: Path, payload:
     if any(data):
         raise ValueError("Instrumented provider is already in use")
     jets.main(original, histogram, provider=provider, payload=payload, provenance=provenance,
-              scope=scope, mode=jets.Mode.full, events=events)
+              scope=scope, mode=jets.Mode.full, n=events)
     counter(data, len(COUNTERS))
     values = dict(zip(COUNTERS, data, strict=True))
     if values["standard_draws"] != values["misses"] or values["scalar_draws"] != values["scalar_seeds"] + values["scalar_rejections"]:
