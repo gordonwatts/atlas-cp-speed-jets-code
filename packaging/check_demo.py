@@ -90,7 +90,8 @@ def prepare(bundle: Path, result: Path, python: Path, uv: Path) -> None:
 
 
 @APP.command()
-def smoke(result: Path, original: Path, reference_nominal: Path, events: int = 32) -> None:
+def smoke(result: Path, original: Path, reference_nominal: Path, events: int = 32,
+          matched_read: bool = False) -> None:
     """Run the same visible script via pristine pip and uv, and check the independent nominal control."""
     result = result.resolve()
     original = original.resolve(strict=True)
@@ -102,13 +103,24 @@ def smoke(result: Path, original: Path, reference_nominal: Path, events: int = 3
                "--no-python-downloads", "--python", record["python"], "--cache-dir",
                result / "uv/cache", result / "uv" / record["script"]],
     }
+    extras = ["--matched-read"] if matched_read else []
     for name, command in commands.items():
         cwd = result / name
-        run([*command, original, cwd / "full.npz", "--events", events, "-n", 2],
+        run([*command, original, cwd / "full.npz", "--events", events, "-n", 2, *extras],
             cwd, "full", 3, {"ATLAS_JET_LIBRARY_AUDIT": str(cwd / "full-library-maps.json")})
     pip = result / "pip"
-    run([*commands["pip"], original, pip / "nominal.npz", "--events", events, "--mode", "nominal"],
+    run([*commands["pip"], original, pip / "nominal.npz", "--events", events, "--mode", "nominal", *extras],
         pip, "nominal", 3, {"ATLAS_JET_LIBRARY_AUDIT": str(pip / "nominal-library-maps.json")})
+    if matched_read:
+        label = "Input branch SHA-256:"
+        digests = {}
+        for name, mode in (("pip", "full"), ("uv", "full"), ("pip", "nominal")):
+            lines = (result / name / f"{mode}.log").read_text().splitlines()
+            value, = (line.split()[-1] for line in lines if line.startswith(label))
+            digests[f"{name}_{mode}"] = value
+        if len(set(digests.values())) != 1:
+            raise RuntimeError(f"Matched-read run resolved different branches: {digests}")
+        (result / "branch-digests.json").write_text(json.dumps(digests, indent=2) + "\n")
     for suffix, count in (("zero", "0"), ("negative", "-1"), ("noninteger", "1.5")):
         run([*commands["pip"], original, pip / f"bad-{suffix}.npz", "--events", events, "-n", count],
             pip, f"bad-{suffix}", 3, expect_success=False)
@@ -129,6 +141,10 @@ def compare(result: Path, reference_nominal: Path) -> None:
         for field in pip.files:
             np.testing.assert_array_equal(pip[field], uv[field], err_msg=field)
         states = {scope: len(pip[f"{scope}_states"]) for scope in ("sr", "lr")}
+    with np.load(result / "pip/nominal.npz") as one, np.load(result / "pip/full.npz") as many:
+        for name in one.files:
+            expected = many[name] if name in ("edges", "events") else many[name][..., :1]
+            np.testing.assert_array_equal(one[name], expected, err_msg=f"matched NOSYS {name}")
     errors = {}
     with np.load(result / "pip/nominal.npz") as candidate, np.load(reference_nominal) as authority:
         for field in authority.files:
@@ -140,6 +156,7 @@ def compare(result: Path, reference_nominal: Path) -> None:
                 np.testing.assert_array_equal(got, expected, err_msg=field)
     (result / "smoke-comparison.json").write_text(json.dumps({
         "pip_uv_full_exact": True,
+        "pip_nominal_full_exact": True,
         "original_nominal_control": str(reference_nominal),
         "nominal_histogram_max_absolute_differences": errors,
         "state_counts": states,
