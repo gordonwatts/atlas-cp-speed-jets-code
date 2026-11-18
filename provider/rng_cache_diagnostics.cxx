@@ -12,3 +12,7 @@ extern "C" std::size_t jets_resolution_rng_counts(std::uint64_t* output, std::si
     std::copy(counts.begin(), counts.end(), output);
   return counts.size();
 }
+
+extern "C" std::size_t jets_resolution_rng_cache_slots() noexcept {
+  return jets::detail::resolution_cache_slots;
+}

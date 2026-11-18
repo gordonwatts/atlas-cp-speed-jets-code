@@ -18,6 +18,7 @@ for choice in "${@:4}"; do
   esac
   case "$choice" in
     rng-cache) jets_candidate_defines+=(-DJETS_RNG_CACHE) ;;
+    rng-cache-large) jets_candidate_defines+=(-DJETS_RNG_CACHE -DJETS_RNG_CACHE_LARGE) ;;
     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
     uncertainty-batch) jets_candidate_defines+=(-DJETS_UNCERTAINTY_BATCH) ;;
     fast-variable-flow) jets_candidate_defines+=(-DJETS_FAST_VARIABLE_FLOW) ;;
@@ -25,6 +26,18 @@ for choice in "${@:4}"; do
   esac
   jets_candidate_choices+=("$choice")
 done
+rng_cache_slots=0
+case " ${jets_candidate_choices[*]} " in
+  *" rng-cache "*) rng_cache_slots=65536 ;;
+esac
+case " ${jets_candidate_choices[*]} " in
+  *" rng-cache-large "*)
+    if (( rng_cache_slots != 0 )); then
+      echo "Choose exactly one Gaussian cache size" >&2
+      exit 2
+    fi
+    rng_cache_slots=262144 ;;
+esac
 mkdir "$root/results/build/$label"
 cd "$root/results/build/$label"
 exec > build.log 2>&1
@@ -45,6 +58,7 @@ if [[ " ${jets_candidate_choices[*]} " == *" rng-cache-diagnostics "* ]]; then
   sources+=(provider/rng_cache_diagnostics)
 fi
 printf '%s\n' "${jets_candidate_choices[@]:-baseline}" > build-choices.txt
+printf '%d\n' "$rng_cache_slots" > rng-cache-slots.txt
 printf '%s\n' "-DJETS_PORTABLE" "${jets_candidate_defines[@]}" > build-defines.txt
 printf '%s\n' "${cxx_flags[@]}" > compile-flags.txt
 git -C "$root" rev-parse HEAD > source-revision.txt

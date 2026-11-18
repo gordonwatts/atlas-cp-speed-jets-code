@@ -139,5 +139,6 @@ int main() {
   compare_seeded_draws();
   compare_recipe();
   verify_counts();
+  std::cout << "cache_slots " << jets::detail::resolution_cache_slots << '\n';
   std::cout << "bitwise ROOT checks " << checked << '\n';
 }

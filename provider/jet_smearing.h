@@ -38,6 +38,17 @@ struct ResolutionRandom {
 
 namespace detail {
 
+#ifdef JETS_RNG_CACHE
+#ifdef JETS_RNG_CACHE_LARGE
+inline constexpr unsigned resolution_cache_index_bits = 18;
+#else
+inline constexpr unsigned resolution_cache_index_bits = 16;
+#endif
+inline constexpr unsigned resolution_cache_slots = 1u << resolution_cache_index_bits;
+#else
+inline constexpr unsigned resolution_cache_slots = 0;
+#endif
+
 #ifdef JETS_RNG_CACHE_DIAGNOSTICS
 enum ResolutionCount {
   cache_hits, cache_misses, standard_draws, guarded_restarts, negative_restarts,
@@ -70,10 +81,9 @@ double resolution_draw(Generator& generator, long long seed, double width) {
       long long seed;
       double normal;
     };
-    constexpr unsigned index_bits = 16;
-    thread_local std::array<Entry, 1u << index_bits> entries{};
+    thread_local std::array<Entry, resolution_cache_slots> entries{};
     const auto hash = static_cast<std::uint64_t>(seed) * 0x9e3779b97f4a7c15ULL;
-    auto& entry = entries[hash >> (64 - index_bits)];
+    auto& entry = entries[hash >> (64 - resolution_cache_index_bits)];
     if (entry.seed == seed) {
       JETS_COUNT_RESOLUTION(cache_hits);
     } else {
