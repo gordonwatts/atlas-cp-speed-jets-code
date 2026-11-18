@@ -394,7 +394,7 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
                           if reuse_nominal_nnjvt_update and features is not None and mode == Mode.full else None)
         context = (truth_context(source, R10_TRUTH, buffers)
                    if prefix == "lr" and (ff_names or prepare_large_truth) and not stages_only else nullcontext())
-        pair_scope = (buffers.unsigned_sign_pairs(len(calibration))
+        pair_scope = (buffers.unsigned_sign_pairs(len(corrected))
                       if reuse_uncertainty_sign_pairs and mode == Mode.full else nullcontext())
         with context, pair_scope as pairing:
             evaluate_state = uncertainty.evaluate
