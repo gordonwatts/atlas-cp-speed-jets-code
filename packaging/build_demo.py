@@ -139,7 +139,7 @@ def build_visible_script(
     compact_defaults: tuple[str, ...] = (),
     reuse_nnjvt_default: bool = False,
     sign_pair_scopes: tuple[str, ...] = (),
-    chunk_events: int | None = None,
+    large_chunk_events: int | None = None,
     columnar_source: bytes | None = None,
 ) -> None:
     if not compact and compact_defaults:
@@ -197,9 +197,13 @@ def build_visible_script(
         source = use_compact_payload(source, compact_defaults)
     source = use_nnjvt_default(source, reuse_nnjvt_default)
     source = set_sign_pair_scopes(source, sign_pair_scopes)
-    if chunk_events is not None:
-        chunk_opt = '    chunk: Annotated[int | None, typer.Option("--chunk", min=1)] = '
-        source = replace_once(source, chunk_opt + "None,", chunk_opt + f"{chunk_events},")
+    if large_chunk_events is not None:
+        source = replace_once(
+            source, "    mode_name = mode.value\n",
+            '    if chunk is None and scope == Scope.large:\n'
+            f'        chunk = {large_chunk_events}\n'
+            "    mode_name = mode.value\n",
+        )
     compile(source, output.as_posix(), "exec")
     output.write_text(source)
 
@@ -327,7 +331,7 @@ def build(
         help="Default compact loading by single-collection scope. Both enables small and large separately.",
     )] = CompactDefault.off,
     sign_default_scope: Annotated[list[str] | None, typer.Option(help="Full workflows using signed component reuse")] = None,
-    chunk_events: Annotated[int | None, typer.Option(min=1, help="Qualified physical chunk size override")] = None,
+    large_chunk_events: Annotated[int | None, typer.Option(min=1, help="Qualified large-radius-only chunk size")] = None,
     reuse_nominal_nnjvt_default: Annotated[bool, typer.Option(
         help="Default to exact-input NNJvt reuse for small-R full systematics.",
     )] = False,
@@ -347,6 +351,7 @@ def build(
     compact_scopes = COMPACT_DEFAULT_SCOPES[compact_default]
     if scope_index is None and compact_scopes:
         raise ValueError("--compact-default requires --scope-index")
+    base_chunk = json.loads((CHECKOUT / "config/jet-histogram.json").read_text())["chunk_events"]
     columnar_source = (CHECKOUT / "columnar/jets.py").read_bytes()
     payload_identity = identify(payload)
     if scope_index is not None:
@@ -415,7 +420,7 @@ def build(
                 "scope": "both",
                 "compact_payload_default_scopes": list(compact_scopes),
                 "reuse_uncertainty_sign_pair_scopes": list(sign_scopes),
-                "chunk_events": chunk_events or json.loads((CHECKOUT / "config/jet-histogram.json").read_text())["chunk_events"],
+                "chunk_events_by_scope": {"small": base_chunk, "large": large_chunk_events or base_chunk, "both": base_chunk},
                 "reuse_nominal_nnjvt_update": reuse_nominal_nnjvt_default,
                 "reuse_nominal_nnjvt_update_modes": ["full"],
                 "reuse_nominal_nnjvt_update_scopes": ["small", "both"],
@@ -433,7 +438,7 @@ def build(
         build_visible_script(
             wheel, version, script, compact=scope_index is not None, compact_defaults=compact_scopes,
             reuse_nnjvt_default=reuse_nominal_nnjvt_default, sign_pair_scopes=sign_scopes,
-            chunk_events=chunk_events, columnar_source=columnar_source,
+            large_chunk_events=large_chunk_events, columnar_source=columnar_source,
         )
         build_identity["visible_source"] = identify(script)
         (data / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
