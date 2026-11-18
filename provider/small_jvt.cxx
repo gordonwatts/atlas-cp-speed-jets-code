@@ -213,7 +213,7 @@ public:
 
     lwt::VectorX<double> inputs(4);
     inputs << rpt, as_float(values, jvf_), static_cast<float>(pt_bin), static_cast<float>(eta_bin);
-    const auto predicted = network_->compute(lwt::NodeVec<double>{std::move(inputs)});
+    const auto predicted = network_->compute(lwt::generic::NodeVec<double>{std::move(inputs)});
     const float score = static_cast<float>(predicted(0));
     output[0] = score;
     output[2] = score > cuts_.cuts[pt_bin][eta_bin];

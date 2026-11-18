@@ -186,8 +186,8 @@ def correction_def(name, configuration):
 
 
 def export_jet_uncertainties(
-        contract_path=Path("config/jet-states.json"),
-        initialized_path=Path("results/reference/observer-smoke-003/initialized-tools.tsv")):
+        contract_path=Path(__file__).resolve().parents[1] / "config/jet-states.json",
+        initialized_path=Path(__file__).resolve().parents[1] / "results/reference/observer-smoke-003/initialized-tools.tsv"):
     """Return both schema-v3 correction definitions and their resolved provenance."""
     import ROOT
     from PathResolver import PathResolver

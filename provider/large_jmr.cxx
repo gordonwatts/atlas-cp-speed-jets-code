@@ -50,13 +50,12 @@ TruthJetRange TruthContext::event(std::int64_t event_index) {
 }
 
 const P4* nearest_truth_jet(const P4& reco, TruthJetRange truth, double maximum_delta_r) {
-  const TLorentzVector reco_cartesian(reco.Px(), reco.Py(), reco.Pz(), reco.E());
+  const auto reco_cartesian = as_cartesian(reco);
   const P4* match = nullptr;
   double closest_distance = maximum_delta_r;
   for (std::size_t index = 0; index < truth.size; ++index) {
     const auto& candidate = truth.data[index];
-    const TLorentzVector candidate_cartesian(candidate.Px(), candidate.Py(), candidate.Pz(), candidate.E());
-    const float distance = static_cast<float>(reco_cartesian.DeltaR(candidate_cartesian));
+    const float distance = truth_distance(reco_cartesian, candidate);
     // Strict comparison after the float cast keeps the first candidate on ties.
     if (distance < closest_distance) {
       closest_distance = distance;
