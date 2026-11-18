@@ -109,6 +109,27 @@ def select_states(mode, manifest, selected):
     return states
 
 
+def native_runtime(provider):
+    import correctionlib
+
+    package = Path(correctionlib.__file__).resolve().parent
+    expected = (package / "lib/libcorrectionlib.so").resolve(strict=True)
+    mapped = set()
+    for line in Path("/proc/self/maps").read_text().splitlines():
+        parts = line.split(maxsplit=5)
+        if len(parts) == 6 and parts[5].startswith("/"):
+            mapped.add(Path(parts[5]).resolve())
+    cores = sorted(path for path in mapped if path.name.startswith("libcorrectionlib.so"))
+    if cores != [expected]:
+        raise RuntimeError(f"Expected exactly one CorrectionLib core mapped from {package}, found {cores}")
+    provider_path = provider.resolve(strict=True)
+    if provider_path not in mapped:
+        raise RuntimeError(f"Requested jet provider is absent from /proc/self/maps: {provider_path}")
+    used = ("libcorrectionlib.so", "_core.cpython", "libJetCalibToolsLib", "libJetUncertaintiesLib", "liblwtnn")
+    return {"core": str(expected), "provider": str(provider_path),
+            "mapped": sorted(str(path) for path in mapped if path.name.startswith(used))}
+
+
 def load_corrections(provider, payload, need_transport=True):
     from correctionlib import CorrectionSet, plugins
 
@@ -116,6 +137,7 @@ def load_corrections(provider, payload, need_transport=True):
     plugins.enable_discovery(False)
     plugins.load_library(str(resolved))
     nodes = CorrectionSet.from_file(str(payload))
+    native_runtime(resolved)
     buffers = None
     if need_transport:
         from jet_transport import JetBuffers

@@ -14,7 +14,7 @@ if str(CHECKOUT) not in sys.path:
 
 from columnar.jets import (
     EVENT_FIELDS, STAGES, WEIGHT_DIRECTIONS, Mode, Scope, check_execution, chunk_bounds,
-    evaluate_chunk, ff_states, load_corrections, select_states, selected_collections,
+    evaluate_chunk, ff_states, load_corrections, native_runtime, select_states, selected_collections,
 )
 from columnar.inputs import (
     EVENT_KEYS, LARGE_OBSERVABLES, P4_FIELDS, branch_plan, flatten, offsets,
@@ -273,6 +273,7 @@ def main(
         "source_phySLITE": str(original.resolve()), "source_file_uuid": original_uuid,
         "authority": str(authority.resolve()), "provider": str(provider.resolve()) if provider else None,
         "payload": str(payload.resolve()) if payload else None, "execution": execution,
+        "runtime": native_runtime(provider) if nodes is not None else None,
         "entries_requested": entries, "entries_compared": events_seen,
         "states": states, "observer_branches_comparable": len(expected),
         "source_branches_read": sorted({value for value in raw.values() if value is not None}),
