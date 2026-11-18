@@ -13,7 +13,7 @@ from tempfile import NamedTemporaryFile
 import numpy as np
 import typer
 
-from profile_final_demo import checked_installation, histogram_comparison, stock_endpoint
+from profile_final_demo import checked_installation, histogram_comparison, stock_endpoint, validate_run
 from profile_native import FORBIDDEN, digest, verify_loaded, wheel_identity
 
 
@@ -422,11 +422,64 @@ def collect_profile(archive, output, plan, packaged, defaults, original, demo, s
                 and same_path(audit["profile_recording"], native / "recording.json")
                 and all(audit["stock_exact_fields"].values()) and all(audit["profiled_exact_fields"].values()),
                 "Unprofiled diagnostic does not reproduce the selected native workload")
+        command = read(optional / "command.json")
+        profiled_argv = read(native / "command.json")
+        profiled_argv = profiled_argv[profiled_argv.index("--") + 1:]
+        process = read(optional / "application.json")
+        unprofiled_argv = [*profiled_argv[:3], str(optional / "histogram.npz"), *profiled_argv[4:]]
+        require(command == {"recorded_visible_argv": profiled_argv, "unprofiled_argv": unprofiled_argv}
+                and profiled_argv[1:] == [str(demo), str(original), str(saved), "-n", str(repetitions)]
+                and process["argv"] == ["taskset", "-c", "3", *unprofiled_argv]
+                and process["exit"] == 0 and process["threads_seen"] == [1] and process["cpus_seen"] == ["3"]
+                and process["source_mapping_observed"] and process["wall_s"] == audit["wall_s"]
+                and same_path(audit["process_receipt"], optional / "application.json"),
+                "Matched unprofiled command or process receipt disagrees with the installed profiled run")
         check_record(optional / "histogram.npz", {"sha256": audit["histogram_sha256"]}, check_path=False)
         histograms(optional / "histogram.npz", saved, "both")
-        verify_loaded(optional, packaged)
+        histograms(optional / "histogram.npz", stocks["both"], "both")
+        require(verify_loaded(optional, packaged) == audit["physically_mapped_libraries"],
+                "Unprofiled runtime map differs from the captured audit")
         archive.members(optional, FINAL / optional.name, ("diagnostic.json", "application.json", "application.log",
                                                             "library-maps.json", "command.json", "histogram.npz"))
+
+
+def collect_python_profile(archive, output, installed, packaged, manifest, bundle, demo, original, dataset, stocks):
+    directory = output / "python-profile"
+    summary = read(directory / "summary.json")
+    provenance = read(directory / "provenance.json")
+    comparison = read(directory / "histogram-comparison.json")
+    process = read(directory / "visible.json")
+    profile = directory / "profile.pstats"
+    histogram = directory / "histograms.npz"
+    expected = [str(installed), "-m", "cProfile", "-o", str(profile), str(demo), str(original),
+                str(histogram), "--events", str(EVENTS)]
+    require(read(directory / "command.json") == expected
+            and process["argv"] == ["taskset", "-c", "3", *expected]
+            and process["exit"] == 0 and process["threads_seen"] == [1] and process["cpus_seen"] == ["3"]
+            and process["source_mapping_observed"],
+            "Python profile did not execute the exact installed visible command on the original file")
+    require(provenance["scope"] == "both" and provenance["mode"] == "full"
+            and provenance["events"] == EVENTS and provenance["passes"] == 1
+            and provenance["cpu"] == 3 and provenance["threads"] == 1
+            and provenance["original"] == dataset and provenance["wheel"] == packaged
+            and provenance["selected_defaults"] == manifest["demo_defaults"],
+            "Python profile receipt differs from the selected wheel, visible defaults or original source")
+    check_record(demo, provenance["demo"])
+    check_record(bundle, provenance["bundle"])
+    check_record(stocks["both"], provenance["stock"]["histogram"])
+    check_record(profile, summary["pstats"])
+    check_record(histogram, comparison, check_path=False)
+    actual_fields = histogram_comparison(stocks["both"], histogram, "both", EVENTS)
+    require(summary["passed"] and summary["exact_stock_histogram"]
+            and actual_fields == comparison["exact_fields"] and all(actual_fields.values())
+            and summary["source_and_runtime_audit"] ==
+            validate_run(directory, "both", EVENTS, dataset["tfile_uuid"], manifest, packaged),
+            "Python profile histogram or runtime receipts differ from the exact installed workflow")
+    # Raw pstats remains in WSL; its size and SHA-256 are in the archived summary.
+    archive.members(directory, FINAL / directory.name, ("summary.json", "summary.txt", "provenance.json",
+                                                         "command.json", "visible.json", "visible.log",
+                                                         "library-maps.json", "histograms.npz",
+                                                         "histogram-comparison.json"))
 
 
 def collect_phases_and_order(archive, output, reference, installed, packaged, defaults, original, observer, uuid, stocks, demo):
@@ -568,6 +621,7 @@ def main(specification: Path, report: Path = REPORT, controller: Path | None = N
     collect_framework(archive, output, paths, defaults, observer, original, uuid, stocks)
     collect_shipped(archive, output, paths["installation"], packaged, defaults, original, stocks, digest(demo))
     collect_profile(archive, output, plan, packaged, defaults, original, demo, stocks)
+    collect_python_profile(archive, output, python, packaged, manifest, bundle_path, demo, original, dataset, stocks)
     collect_phases_and_order(archive, output, reference, paths["installation"], packaged, defaults,
                              original, observer, uuid, stocks, demo)
     if controller is not None:
