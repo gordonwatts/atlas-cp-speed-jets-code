@@ -125,7 +125,7 @@ def main(plan:Path, output:Path):
         if not set(active).issubset(scopes) or not active:
             raise ValueError(f"Invalid scope subset for {name}")
         args = variant.get("options", [])
-        if any(arg not in {"--reuse-nominal-nnjvt-update"} for arg in args):
+        if any(arg not in {"--reuse-nominal-nnjvt-update", "--reuse-uncertainty-sign-pairs"} for arg in args):
             raise ValueError(f"Unsupported trial options for {name}")
         runtime = {scope: variant_runtime(config, variant, scope) for scope in active}
         sdk = runtime[active[0]]["sdk"]

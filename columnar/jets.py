@@ -307,7 +307,8 @@ def small_sf(nodes, buffers, p4, selection, truth, counts, state, diagnose):
 
 
 def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buffers,
-                   diagnose=False, through="final", prepare_large_truth=False, reuse_nominal_nnjvt_update=False):
+                   diagnose=False, through="final", prepare_large_truth=False, reuse_nominal_nnjvt_update=False,
+                   reuse_uncertainty_sign_pairs=False):
     stages_only = through != "final"
     if mode == Mode.stored or through == "stored":
         for prefix in selected:
@@ -393,16 +394,25 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
                           if reuse_nominal_nnjvt_update and features is not None and mode == Mode.full else None)
         context = (truth_context(source, R10_TRUTH, buffers)
                    if prefix == "lr" and (ff_names or prepare_large_truth) and not stages_only else nullcontext())
-        with context:
+        pair_scope = (buffers.unsigned_sign_pairs(len(calibration))
+                      if reuse_uncertainty_sign_pairs and mode == Mode.full else nullcontext())
+        with context, pair_scope as pairing:
+            evaluate_state = uncertainty.evaluate
+            if pairing is not None:
+                from functools import partial
+
+                evaluate_state = partial(pairing.evaluate, evaluate_state)
             for state in states[prefix]:
                 is_weight_only = prefix == "sr" and state in WEIGHT_DIRECTIONS
                 is_ff = prefix == "lr" and state in ff_names
+                if pairing is not None and (is_weight_only or is_ff):
+                    pairing.discard()
                 if stages_only and (is_weight_only or is_ff):
                     continue
                 if is_ff or is_weight_only:
                     varied = nominal
                 else:
-                    varied = uncertainty.evaluate(*arguments, state)
+                    varied = evaluate_state(*arguments, state)
                     if state == "NOSYS":
                         nominal = varied
                 valid_combined = status_bits(varied[:, 4], varied[:, 5], f"{prefix} {state} uncertainty")
@@ -484,6 +494,9 @@ def main(
     reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
         "--reuse-nominal-nnjvt-update", help="Trial bitwise-identical nominal NNJvt update rows in full mode",
     )] = False,
+    reuse_uncertainty_sign_pairs: Annotated[bool, typer.Option(
+        "--reuse-uncertainty-sign-pairs", help="Trial the native adjacent sign-pair group aggregate",
+    )] = False,
 ):
     """Histogram jets directly from the original PHYSLITE CollectionTree."""
     check_execution()
@@ -539,7 +552,8 @@ def main(
                 check_execution()
                 for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers,
                                             prepare_large_truth=matched_nominal,
-                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update):
+                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update,
+                                            reuse_uncertainty_sign_pairs=reuse_uncertainty_sign_pairs):
                     if frame.state == "NOSYS":
                         objects[frame.prefix] += int(frame.counts.sum())
                     pt = frame.fields.get("hist_pt", frame.fields.get("p4pt"))
@@ -578,6 +592,8 @@ def main(
     typer.echo(f"Input branch SHA-256: {branch_digest}")
     if matched_read and mode != Mode.stored:
         typer.echo("Calibrated input plan: matched full-state reads and truth preparation")
+    if reuse_uncertainty_sign_pairs:
+        typer.echo("Trial enabled: reuse unsigned uncertainty aggregate within adjacent state pairs")
     if reuse_nominal_nnjvt_update:
         typer.echo("Trial enabled: reuse nominal NNJvt update for bitwise-identical input rows")
     typer.echo(f"{events} unique events, {event_visits} event visits across {repeat} passes")

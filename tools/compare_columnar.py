@@ -197,6 +197,9 @@ def main(
     reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
         "--reuse-nominal-nnjvt-update", help="Validate the exact-input NNJvt update reuse trial",
     )] = False,
+    reuse_uncertainty_sign_pairs: Annotated[bool, typer.Option(
+        "--reuse-uncertainty-sign-pairs", help="Verify the opt-in native adjacent sign-pair trial",
+    )] = False,
 ):
     """Record exact per-object, event, and status agreement for configured states."""
     execution = check_execution()
@@ -265,7 +268,8 @@ def main(
                     recorder.begin_chunk()
                 for frame in evaluate_chunk(original_data, stop - start, selected, mode, states, ff_names,
                                             nodes, buffers, diagnose=True, through=stage,
-                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update):
+                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update,
+                                            reuse_uncertainty_sign_pairs=reuse_uncertainty_sign_pairs):
                     for field, values in frame.fields.items():
                         if field in UNOBSERVED_FRAME_FIELDS:
                             continue
@@ -318,6 +322,7 @@ def main(
         "execution_failure": failure, "checks": diagnostic.checks, "histogram": histogram,
         "endpoint_distributions": endpoint_distributions,
         "reuse_nominal_nnjvt_update": reuse_nominal_nnjvt_update,
+        "reuse_uncertainty_sign_pairs": reuse_uncertainty_sign_pairs,
     }
     with output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, allow_nan=False)

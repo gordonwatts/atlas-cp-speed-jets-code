@@ -38,6 +38,15 @@ class JetBuffers:
             if getattr(self.lib, "jets_unbind_" + name)():
                 raise RuntimeError(self.lib.jets_buffer_error().decode())
 
+    @contextmanager
+    def unsigned_sign_pairs(self, rows):
+        pairing = _UnsignedSignPairs(self.lib)
+        pairing.call("jets_begin_unsigned_pairs", rows)
+        try:
+            yield pairing
+        finally:
+            pairing.call("jets_end_unsigned_pairs")
+
     def truth(self, offsets, pt, eta, phi, mass):
         return self._borrow("truth",offsets,np.float64,pt,eta,phi,mass)
 
@@ -49,3 +58,38 @@ class JetBuffers:
 
     def weights(self, offsets, weights):
         return self._borrow("weights",offsets,np.float64,weights)
+
+class _UnsignedSignPairs:
+    def __init__(self, library):
+        if not hasattr(library, "jets_begin_unsigned_pairs"):
+            raise ValueError("The sign-pair experiment requires the opt-in compiled provider")
+        self.library = library
+        library.jets_unsigned_pair_error.argtypes = []
+        library.jets_unsigned_pair_error.restype = ct.c_char_p
+        signatures = (
+            ("jets_begin_unsigned_pairs", [ct.c_size_t]),
+            ("jets_end_unsigned_pairs", []),
+            ("jets_unsigned_pair_begin_state", []),
+            ("jets_unsigned_pair_end_state", [ct.c_int]),
+            ("jets_unsigned_pair_discard", []),
+        )
+        for name, arguments in signatures:
+            function = getattr(library, name)
+            function.argtypes, function.restype = arguments, ct.c_int
+
+    def call(self, name, *args):
+        if getattr(self.library, name)(*args):
+            raise RuntimeError(self.library.jets_unsigned_pair_error().decode())
+
+    def evaluate(self, evaluator, *args):
+        self.call("jets_unsigned_pair_begin_state")
+        completed = False
+        try:
+            values = evaluator(*args)
+            completed = True
+            return values
+        finally:
+            self.call("jets_unsigned_pair_end_state", int(completed))
+
+    def discard(self):
+        self.call("jets_unsigned_pair_discard")

@@ -7,6 +7,9 @@
 #ifdef JETS_NOMINAL_RESOLUTION_CACHE
 #include "nominal_resolution_cache.h"
 #endif
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+#include "unsigned_sign_pairs.h"
+#endif
 
 #include <correction_plugin.h>
 #include <algorithm>
@@ -47,6 +50,9 @@ struct Component {
 
 struct Group {
   bool quadrature;
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+  std::size_t ordinal;
+#endif
   std::map<Scale, std::vector<Component>> pieces;
 };
 
@@ -93,6 +99,9 @@ struct JetUncertaintyModel::Impl {
 #ifdef JETS_NOMINAL_RESOLUTION_CACHE
   const std::uint64_t nominal_resolution_identity = portable::nominal_resolution_identity();
 #endif
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+  const std::uint64_t model_id = unsigned_pairs::model_counter.fetch_add(1, std::memory_order_relaxed);
+#endif
 
   explicit Impl(const correction::PluginConfig& config) {
     rapidjson::Document p;
@@ -116,9 +125,15 @@ struct JetUncertaintyModel::Impl {
       if(!store.HasMember(name.c_str())) throw std::invalid_argument("Missing embedded jet table: "+name);
       return &lookups.try_emplace(key,portable::restore_histogram(store[name.c_str()]),interp).first->second;
     };
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+    std::size_t next_group_ordinal = 0;
+#endif
     for(const auto& group:plan["groups"].GetObject()) {
       const auto& g=group.value;
       auto& dest=groups[group.name.GetString()];
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+      dest.ordinal = next_group_ordinal++;
+#endif
       dest.quadrature=std::string(g["correlation"].GetString())=="Uncorrelated";
       for(const auto& comp:g["components"].GetArray()) {
         Component c;
@@ -199,6 +214,17 @@ struct JetUncertaintyModel::Impl {
   }
 
   JetUncertaintyResult evaluate(const JetUncertaintyInput& input,const State* state) const {
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+    auto& shared = unsigned_pairs::chunk;
+    std::optional<std::size_t> row;
+    if (shared) {
+      std::optional<unsigned_pairs::StateKey> key;
+      if (state && state->group->pieces.size() == 1 && (state->sign == 1 || state->sign == -1)) {
+        key = unsigned_pairs::StateKey{model_id, state->group->ordinal, state->sign, state->pseudo};
+      }
+      row = shared->visit(key);
+    }
+#endif
     bool pseudo=state && state->pseudo;
     JetUncertaintyResult out{input.p4,std::nullopt,std::nullopt};
     if(!pseudo) out.is_bjet=input.parton_truth_label==5;
@@ -217,13 +243,22 @@ struct JetUncertaintyModel::Impl {
         }
       }
       for(const auto& [scale,pieces]:group.pieces) {
-        double uncertainty=0.0;
-        for(const auto& c:pieces) {
-          double v=value(c,coords,out.is_bjet.value_or(false));
-          uncertainty+=group.quadrature && pieces.size()>1 ? std::pow(v,2) : v;
-        }
-        if(group.quadrature && pieces.size()>1) uncertainty=std::sqrt(uncertainty);
-        uncertainty*=state->sign;
+        const auto unsigned_aggregate = [&] {
+          double result = 0.0;
+          for (const auto& c : pieces) {
+            const double v = value(c, coords, out.is_bjet.value_or(false));
+            result += group.quadrature && pieces.size() > 1 ? std::pow(v, 2) : v;
+          }
+          return group.quadrature && pieces.size() > 1 ? std::sqrt(result) : result;
+        };
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+        const auto cached = row ? shared->cached(*row, input) : std::nullopt;
+        const double aggregate = cached ? *cached : unsigned_aggregate();
+        if (row && !cached && std::isfinite(aggregate)) shared->record(*row, input, aggregate);
+#else
+        const double aggregate = unsigned_aggregate();
+#endif
+        const double uncertainty = aggregate * state->sign;
         double pt_factor=1.0, mass_factor=1.0;
         if(scale==Scale::four_vector) pt_factor=mass_factor=1.0+uncertainty;
         else if(scale==Scale::mass) mass_factor=1.0+uncertainty;
@@ -266,3 +301,66 @@ JetUncertaintyModel::Selected JetUncertaintyModel::select(const std::string& sys
 }
 #endif
 } // namespace jets
+
+#ifdef JETS_UNSIGNED_SIGN_PAIRS
+namespace {
+
+thread_local std::string unsigned_pair_error;
+
+template <class Operation>
+int run_unsigned_pair_operation(Operation operation) {
+  try {
+    operation();
+    unsigned_pair_error.clear();
+    return 0;
+  } catch (const std::exception& error) {
+    unsigned_pair_error = error.what();
+    return 1;
+  }
+}
+
+jets::unsigned_pairs::Chunk& pair_chunk() {
+  auto& chunk = jets::unsigned_pairs::chunk;
+  if (!chunk) throw std::logic_error("No unsigned pair chunk is active");
+  return *chunk;
+}
+
+} // namespace
+
+extern "C" int jets_begin_unsigned_pairs(std::size_t rows) {
+  return run_unsigned_pair_operation([&] {
+    auto& chunk = jets::unsigned_pairs::chunk;
+    if (chunk) throw std::logic_error("Unsigned pair chunks cannot be nested");
+    chunk.emplace(rows);
+  });
+}
+
+extern "C" int jets_end_unsigned_pairs() {
+  return run_unsigned_pair_operation([] {
+    if (!pair_chunk().idle()) throw std::logic_error("Cannot close an active unsigned pair state");
+    jets::unsigned_pairs::chunk.reset();
+  });
+}
+
+extern "C" int jets_unsigned_pair_begin_state() {
+  return run_unsigned_pair_operation([] { pair_chunk().begin_state(); });
+}
+
+extern "C" int jets_unsigned_pair_end_state(int completed) {
+  return run_unsigned_pair_operation([&] {
+    if (completed != 0 && completed != 1) throw std::invalid_argument("Expected zero or one for completion");
+    pair_chunk().end_state(completed != 0);
+  });
+}
+
+extern "C" int jets_unsigned_pair_discard() {
+  return run_unsigned_pair_operation([] { pair_chunk().discard(); });
+}
+
+extern "C" std::size_t jets_unsigned_pair_hits() {
+  const auto& chunk = jets::unsigned_pairs::chunk;
+  return chunk ? chunk->hits() : 0;
+}
+
+extern "C" const char* jets_unsigned_pair_error() { return unsigned_pair_error.c_str(); }
+#endif
