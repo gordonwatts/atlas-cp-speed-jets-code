@@ -102,6 +102,7 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
     source_opened = False
     log_path = directory / f"{label}.log"
     with log_path.open("wb") as log:
+        start_unix_ns = time.time_ns()
         start_ns = time.monotonic_ns()
         controller_start_ns = time.process_time_ns()
         worker = subprocess.Popen(["taskset", "-c", str(CPU), *command], cwd=directory,
@@ -116,6 +117,7 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
             pid, code, usage = os.wait4(worker.pid, os.WNOHANG)
             if pid:
                 end_ns = time.monotonic_ns()
+                end_unix_ns = time.time_ns()
                 controller_end_ns = time.process_time_ns()
                 status = os.waitstatus_to_exitcode(code)
                 break
@@ -127,6 +129,7 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
     result = {
         "argv": ["taskset", "-c", str(CPU), *command],
         "wall_s": (end_ns - start_ns) / 1e9,
+        "start_unix_ns": start_unix_ns, "end_unix_ns": end_unix_ns,
         "controller_cpu_s": (controller_end_ns - controller_start_ns) / 1e9,
         "cpu_user_s": usage.ru_utime,
         "cpu_sys_s": usage.ru_stime,
