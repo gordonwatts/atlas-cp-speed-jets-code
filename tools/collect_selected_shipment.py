@@ -65,13 +65,20 @@ def histograms(actual, expected, scope, events=EVENTS):
 
 
 def check_nosys(nominal, full, scope):
-    prefixes = ("sr", "lr") if scope == "both" else ({"small": ("sr",), "large": ("lr",)}[scope])
+    prefixes = {"both": ("sr", "lr"), "small": ("sr",), "large": ("lr",)}[scope]
+    state_fields = {f"{prefix}_states" for prefix in prefixes}
     with np.load(nominal, allow_pickle=False) as a, np.load(full, allow_pickle=False) as b:
-        require(set(a.files) == set(b.files) and int(a["events"]) == int(b["events"]) == EVENTS,
+        fields = set(a.files)
+        require(fields == set(b.files) and state_fields <= fields and int(a["events"]) == int(b["events"]) == EVENTS,
                 f"NOSYS and full histogram inventories differ: {nominal}")
-        for prefix in prefixes:
-            require(a[f"{prefix}_states"].tolist() == ["NOSYS"], f"Expected one nominal state in {nominal}")
-        for field in a.files:
+        for field in state_fields:
+            observed, reference = a[field], b[field]
+            # Fixed-width Unicode storage expands with the longest systematic name.
+            require(observed.dtype.kind == reference.dtype.kind == "U" and observed.shape == (1,)
+                    and reference.ndim == 1 and observed[0] == "NOSYS"
+                    and np.array_equal(observed, reference[:1]) and np.count_nonzero(reference == "NOSYS") == 1,
+                    f"Expected exactly one leading NOSYS category in {field} for {nominal}")
+        for field in fields - state_fields:
             reference = b[field] if field in ("edges", "events") else b[field][..., :1]
             observed = a[field]
             require(observed.dtype == reference.dtype and observed.shape == reference.shape
