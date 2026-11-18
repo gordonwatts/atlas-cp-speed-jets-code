@@ -27,6 +27,7 @@ for key in (
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
+from hashlib import sha256
 import json
 from pathlib import Path
 import sys
@@ -472,6 +473,7 @@ def main(
     first_pass = None
     first_objects = None
     file_uuid = None
+    branch_digest = None
     event_visits = 0
     object_visits = {prefix: 0 for prefix in states}
     for pass_number in range(1, repeat + 1):
@@ -489,6 +491,10 @@ def main(
             tree = root_file["CollectionTree"]
             branches = resolve_branches(tree, plan)
             requested = sorted({name for name in branches.values() if name is not None})
+            digest = sha256("\n".join(requested).encode("utf-8")).hexdigest()
+            if branch_digest is not None and digest != branch_digest:
+                raise ValueError("Resolved PHYSLITE branches changed between complete passes")
+            branch_digest = digest
             events, ranges = chunk_bounds(tree.num_entries, n, chunk or spec["chunk_events"])
             for start, stop in ranges:
                 arrays = tree.arrays(requested, entry_start=start, entry_stop=stop, how=dict, library="ak")
@@ -531,6 +537,7 @@ def main(
     with output.open("xb") as stream:
         np.savez(stream, **results)
     typer.echo(f"{original.name} ({file_uuid}), {len(requested)} input branches")
+    typer.echo(f"Input branch SHA-256: {branch_digest}")
     if matched_read and mode != Mode.stored:
         typer.echo("Calibrated input plan: matched full-state reads and truth preparation")
     typer.echo(f"{events} unique events, {event_visits} event visits across {repeat} passes")
