@@ -190,9 +190,12 @@ def verify_loaded(output, wheel):
     if any(path.is_relative_to("/cvmfs") or path.name.startswith(FORBIDDEN) for path in seen):
         raise ValueError("Profile mapped a ROOT, AnalysisBase or CVMFS library")
     for name, identity in wheel["native"].items():
-        stem = name.split(".so")[0]
-        matches = {path for path in seen if path.name.startswith(stem)}
         expected = Path(identity["path"])
+        if name.startswith("_core.cpython"):
+            matches = {path for path in seen if path.parent.name == "correctionlib"
+                       and path.name.startswith("_core.cpython")}
+        else:
+            matches = {path for path in seen if path.name.startswith(name.split(".so")[0])}
         if matches != {expected} or digest(expected) != identity["sha256"]:
             raise ValueError(f"Profile mapped a different {name}: {matches}")
     return audit
