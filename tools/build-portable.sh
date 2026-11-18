@@ -20,6 +20,7 @@ for choice in "${@:4}"; do
     rng-cache) jets_candidate_defines+=(-DJETS_RNG_CACHE) ;;
     rng-cache-large) jets_candidate_defines+=(-DJETS_RNG_CACHE -DJETS_RNG_CACHE_LARGE) ;;
     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
+    large-jmr-match-cache) jets_candidate_defines+=(-DJETS_LARGE_JMR_MATCH_CACHE) ;;
     uncertainty-batch) jets_candidate_defines+=(-DJETS_UNCERTAINTY_BATCH) ;;
     fast-variable-flow) jets_candidate_defines+=(-DJETS_FAST_VARIABLE_FLOW) ;;
     *) echo "Unknown provider build choice: $choice" >&2; exit 2 ;;

@@ -198,7 +198,8 @@ def event_inputs(source, events, nodes, buffers):
 def truth_context(source, collection, buffers):
     counts = np.asarray(ak.to_numpy(ak.num(source[collection, "pt"], axis=1)), dtype=np.int64)
     coordinates = [flatten(source[collection, coordinate], np.float64) for coordinate in P4_FIELDS]
-    return buffers.truth(offsets(counts), *coordinates)
+    bind = buffers.jmr_truth if collection == R10_TRUTH else buffers.truth
+    return bind(offsets(counts), *coordinates)
 
 
 def label_original_jets(source, selected, nodes, buffers):

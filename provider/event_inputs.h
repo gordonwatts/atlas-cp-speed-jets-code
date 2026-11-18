@@ -12,6 +12,11 @@ void register_event_inputs(correction::PluginRegistry&);
 extern "C" {
 int jets_bind_truth(const std::int64_t* offsets, std::size_t n_offsets, const double* pt,
                     const double* eta, const double* phi, const double* mass, std::size_t rows);
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+// Opt-in owned snapshot for the repeated large-R columnar match.
+int jets_bind_jmr_truth(const std::int64_t* offsets, std::size_t n_offsets, const double* pt,
+                        const double* eta, const double* phi, const double* mass, std::size_t rows);
+#endif
 int jets_unbind_truth();
 int jets_bind_vertices(const std::int64_t* offsets, std::size_t n_offsets, const std::int32_t* types,
                        const std::int32_t* tracks, std::size_t rows);

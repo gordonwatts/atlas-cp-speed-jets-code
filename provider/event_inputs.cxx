@@ -56,6 +56,9 @@ struct Truth {
 thread_local std::unique_ptr<Vertices> vertices;
 thread_local std::unique_ptr<Weights> weights;
 thread_local std::unique_ptr<Truth> truth;
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+thread_local std::unique_ptr<jets::TruthContext> jmr_truth;
+#endif
 
 class EventInputs final : public correction::PluginNode {
 public:
@@ -185,6 +188,14 @@ extern "C" int jets_bind_truth(const Int* offsets,size_t count,const double* pt,
     truth=std::move(value);
   });
 }
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+extern "C" int jets_bind_jmr_truth(const Int* offsets, size_t count, const double* pt,
+                                    const double* eta, const double* phi, const double* mass, size_t rows) {
+  return checked([&] {
+    jmr_truth = jets::TruthContext::own_jmr(offsets, count, pt, eta, phi, mass, rows);
+  });
+}
+#endif
 extern "C" int jets_bind_vertices(const Int* offsets,size_t count,const std::int32_t* types,
                                   const std::int32_t* tracks,size_t rows) {
   return checked([&]{
@@ -198,7 +209,18 @@ extern "C" int jets_bind_weights(const Int* offsets,size_t count,const double* d
     weights=std::make_unique<Weights>(Weights{Ranges(offsets,count,rows),data});
   });
 }
-extern "C" int jets_unbind_truth(){return checked([]{if(!truth) throw std::logic_error("unbound truth"); truth.reset();});}
+extern "C" int jets_unbind_truth() {
+  return checked([] {
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+    if (jmr_truth) {
+      jmr_truth.reset();
+      return;
+    }
+#endif
+    if (!truth) throw std::logic_error("unbound truth");
+    truth.reset();
+  });
+}
 extern "C" int jets_unbind_vertices(){return checked([]{if(!vertices) throw std::logic_error("unbound vertices"); vertices.reset();});}
 extern "C" int jets_unbind_weights(){return checked([]{if(!weights) throw std::logic_error("unbound weights"); weights.reset();});}
 

@@ -18,14 +18,18 @@ class JetBuffers:
             bind.restype = ct.c_int
             release = getattr(self.lib, "jets_unbind_" + name)
             release.argtypes, release.restype = [], ct.c_int
+        self._bind_jmr_truth = getattr(self.lib, "jets_bind_jmr_truth", self.lib.jets_bind_truth)
+        self._bind_jmr_truth.argtypes = self.lib.jets_bind_truth.argtypes
+        self._bind_jmr_truth.restype = ct.c_int
 
     @contextmanager
-    def _borrow(self, name, offsets, dtype, *columns):
+    def _borrow(self, name, offsets, dtype, *columns, binder=None):
         offsets = np.ascontiguousarray(offsets,dtype=np.int64)
         arrays = [np.ascontiguousarray(a,dtype=dtype) for a in columns]
         if any(a.ndim != 1 or len(a)!=len(arrays[0]) for a in arrays):
             raise ValueError("jagged buffer columns must have matching flat lengths")
-        binder = getattr(self.lib, "jets_bind_" + name)
+        if binder is None:
+            binder = getattr(self.lib, "jets_bind_" + name)
         if binder(offsets, len(offsets), *arrays, len(arrays[0])):
             raise ValueError(self.lib.jets_buffer_error().decode())
         try:
@@ -36,6 +40,9 @@ class JetBuffers:
 
     def truth(self, offsets, pt, eta, phi, mass):
         return self._borrow("truth",offsets,np.float64,pt,eta,phi,mass)
+
+    def jmr_truth(self, offsets, pt, eta, phi, mass):
+        return self._borrow("truth", offsets, np.float64, pt, eta, phi, mass, binder=self._bind_jmr_truth)
 
     def vertices(self, offsets, types, ntracks):
         return self._borrow("vertices",offsets,np.int32,types,ntracks)

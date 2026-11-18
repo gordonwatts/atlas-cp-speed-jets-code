@@ -12,9 +12,35 @@
 #include <unordered_map>
 #include <utility>
 
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+#include <bit>
+#include <cfenv>
+#include <new>
+#endif
+
 namespace jets {
 
 thread_local const TruthContext* TruthContext::active_ = nullptr;
+
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+struct TruthContext::OwnedTruth {
+  std::vector<std::size_t> offsets;
+  std::vector<P4> jets;
+};
+
+struct TruthContext::MatchCache {
+  struct Key {
+    std::int64_t event = -1;
+    std::array<std::uint64_t, 5> bits{};
+    bool operator==(const Key&) const = default;
+  };
+  struct Entry {
+    Key key;
+    std::size_t index = 0;
+  };
+  std::array<Entry, 4096> entries{};
+};
+#endif
 
 TruthContext::TruthContext(const P4* jets, std::size_t jet_count,
                            const std::size_t* offsets, std::size_t offset_count)
@@ -42,6 +68,30 @@ TruthJetRange TruthContext::event(std::int64_t event_index) {
   return {active_->jets_ + first, last - first};
 }
 
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+std::unique_ptr<TruthContext> TruthContext::own_jmr(
+    const std::int64_t* offsets, std::size_t offset_count, const double* pt,
+    const double* eta, const double* phi, const double* mass, std::size_t rows) {
+  if (active_) throw std::logic_error("Nested truth-jet contexts are unsupported");
+  if (!offsets || !offset_count || (rows && (!pt || !eta || !phi || !mass)) ||
+      offsets[0] != 0 || offsets[offset_count - 1] < 0 ||
+      static_cast<std::uint64_t>(offsets[offset_count - 1]) != rows ||
+      !std::is_sorted(offsets, offsets + offset_count)) {
+    throw std::invalid_argument("Invalid truth-jet buffer and event offsets");
+  }
+  auto snapshot = std::make_unique<OwnedTruth>();
+  snapshot->offsets.assign(offsets, offsets + offset_count);
+  snapshot->jets.reserve(rows);
+  for (std::size_t i = 0; i < rows; ++i) {
+    snapshot->jets.emplace_back(pt[i], eta[i], phi[i], mass[i]);
+  }
+  auto context = std::make_unique<TruthContext>(snapshot->jets.data(), rows,
+                                                snapshot->offsets.data(), offset_count);
+  context->owned_ = std::move(snapshot);
+  return context;
+}
+#endif
+
 const P4* nearest_truth_jet(const P4& reco, TruthJetRange truth, double maximum_delta_r) {
   const auto reco_cartesian = as_cartesian(reco);
   const P4* match = nullptr;
@@ -57,6 +107,45 @@ const P4* nearest_truth_jet(const P4& reco, TruthJetRange truth, double maximum_
   }
   return match;
 }
+
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+const P4* TruthContext::nearest_jmr(const P4& reco, std::int64_t event_index,
+                                   TruthJetRange truth, double maximum_delta_r) {
+  // Generic framework and scalar clients use the borrowed path. The expected
+  // view check prevents memoizing a caller-supplied range even during a C lease.
+  if (!active_ || !active_->owned_ || !truth.size) {
+    return nearest_truth_jet(reco, truth, maximum_delta_r);
+  }
+  const auto owned = event(event_index);
+  if (owned.data != truth.data || owned.size != truth.size || std::fegetround() != FE_TONEAREST) {
+    return nearest_truth_jet(reco, truth, maximum_delta_r);
+  }
+
+  const std::array coordinates{reco.Pt(), reco.Eta(), reco.Phi(), reco.M(), maximum_delta_r};
+  if (!std::all_of(coordinates.begin(), coordinates.end(), [](double v) { return std::isfinite(v); })) {
+    return nearest_truth_jet(reco, truth, maximum_delta_r);
+  }
+  if (!active_->matches_) {
+    active_->matches_.reset(new (std::nothrow) MatchCache);
+    if (!active_->matches_) return nearest_truth_jet(reco, truth, maximum_delta_r);
+  }
+
+  MatchCache::Key key;
+  key.event = event_index;
+  constexpr std::uint64_t mix = 0x9e3779b97f4a7c15ULL;
+  auto hash = static_cast<std::uint64_t>(event_index) * mix;
+  for (std::size_t i = 0; i < coordinates.size(); ++i) {
+    key.bits[i] = std::bit_cast<std::uint64_t>(coordinates[i]);
+    hash = std::rotl(hash ^ key.bits[i], 27) * mix;
+  }
+  auto& entry = active_->matches_->entries[hash >> 52];
+  if (entry.key != key) {
+    const auto* match = nearest_truth_jet(reco, truth, maximum_delta_r);
+    entry = {key, match ? static_cast<std::size_t>(match - truth.data) : truth.size};
+  }
+  return entry.index == truth.size ? nullptr : truth.data + entry.index;
+}
+#endif
 
 }  // namespace jets
 
@@ -102,15 +191,16 @@ double jmr_uncertainty(const jets::P4& reco, const jets::LargeJmrVariation& vari
 
 namespace jets {
 
-LargeJmrResult apply_large_jmr(const P4& reco, std::optional<int> truth_label,
-                               TruthJetRange truth, const jets::CalibrationHistogram& response,
-                               const LargeJmrVariation& variation,
-                               const LargeJmrSettings& settings) {
+namespace {
+template<class FindMatch>
+LargeJmrResult apply_jmr(const P4& reco, std::optional<int> truth_label,
+                         const CalibrationHistogram& response, const LargeJmrVariation& variation,
+                         const LargeJmrSettings& settings, FindMatch&& find_match) {
   if (std::abs(reco.Eta()) > settings.max_abs_eta || reco.M() > settings.max_mass_mev ||
       reco.Pt() > settings.max_pt_mev || reco.M() <= 0.0) {
     return {reco, JmrStatus::out_of_validity, false};
   }
-  const P4* truth_match = nearest_truth_jet(reco, truth, settings.max_match_delta_r);
+  const P4* truth_match = find_match();
   if (!truth_match) return {reco, JmrStatus::out_of_validity, false};
   if (!truth_label) return {reco, JmrStatus::error, false};
 
@@ -140,6 +230,15 @@ LargeJmrResult apply_large_jmr(const P4& reco, std::optional<int> truth_label,
   const double smeared_mass = mass * scale + (mass - average_response * truth_mass) * (resolution - scale);
   const P4 varied(reco.Pt(), reco.Eta(), reco.Phi(), smeared_mass);
   return {varied, JmrStatus::ok, true};
+}
+}  // namespace
+
+LargeJmrResult apply_large_jmr(const P4& reco, std::optional<int> truth_label,
+                               TruthJetRange truth, const CalibrationHistogram& response,
+                               const LargeJmrVariation& variation,
+                               const LargeJmrSettings& settings) {
+  return apply_jmr(reco, truth_label, response, variation, settings,
+                   [&] { return nearest_truth_jet(reco, truth, settings.max_match_delta_r); });
 }
 
 }  // namespace jets
@@ -247,14 +346,21 @@ class LargeJmrNode final : public correction::PluginNode {
                        input_label > std::numeric_limits<int>::max()))) {
       throw std::invalid_argument("Invalid Large-R JMR truth label or availability");
     }
-    const auto truth = jets::TruthContext::event(std::get<std::int64_t>(values.at(indices_.event_index)));
+    const auto event_index = std::get<std::int64_t>(values.at(indices_.event_index));
+    const auto truth = jets::TruthContext::event(event_index);
     const auto& state = found->second;
     const auto& component = components_.at(state.component_index);
     const jets::LargeJmrVariation variation{component.binning, component.topology,
                                              *component.histogram, state.parameter};
-    const auto result = jets::apply_large_jmr(jets::P4(pt, eta, phi, mass),
-        available ? std::optional<int>(static_cast<int>(input_label)) : std::nullopt,
-        truth, *response_, variation, settings_);
+    const jets::P4 reco(pt, eta, phi, mass);
+    const auto label = available ? std::optional<int>(static_cast<int>(input_label)) : std::nullopt;
+#ifdef JETS_LARGE_JMR_MATCH_CACHE
+    const auto result = jets::apply_jmr(reco, label, *response_, variation, settings_, [&] {
+      return jets::TruthContext::nearest_jmr(reco, event_index, truth, settings_.max_match_delta_r);
+    });
+#else
+    const auto result = jets::apply_large_jmr(reco, label, truth, *response_, variation, settings_);
+#endif
     output[0] = result.write_p4 ? static_cast<float>(result.p4.Pt()) : pt;
     output[1] = result.write_p4 ? static_cast<float>(result.p4.Eta()) : eta;
     output[2] = result.write_p4 ? static_cast<float>(result.p4.Phi()) : phi;
