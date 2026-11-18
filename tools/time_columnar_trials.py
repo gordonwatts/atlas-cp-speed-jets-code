@@ -112,6 +112,9 @@ def main(plan:Path, output:Path):
     scopes=config["scopes"]
     rounds=config.get("rounds",4)
     events=config["events"]
+    chunk = config.get("physical_chunk")
+    if chunk is not None and (type(chunk) is not int or not 1 <= chunk <= events):
+        raise ValueError("Invalid physical input chunk in the sealed plan")
     if len(names)<2 or rounds<1 or events!=20000:
         raise ValueError("Full-file candidate comparisons need at least two distinct configurations")
     env=dict(os.environ)
@@ -161,6 +164,8 @@ def main(plan:Path, output:Path):
                 command=[runtime["python"],config["script"],config["input"],str(result.resolve()),
                          "--provider",v["provider"],"--payload",runtime["payload"],
                          "--provenance",runtime["provenance"],"--scope",scope,"--mode","full","--events",str(events)]
+                if chunk is not None:
+                    command.extend(["--chunk", str(chunk)])
                 command.extend(v.get("options", []))
                 verify_script_sources(config)
                 before=snapshot()

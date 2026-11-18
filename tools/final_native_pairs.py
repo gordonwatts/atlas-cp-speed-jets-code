@@ -221,7 +221,8 @@ def read_specification(specification, core, core_sha):
 
 def main(specification: Path, output: Path,
          rounds: Annotated[int, typer.Option(min=1, max=4)] = 4,
-         screen_events: Annotated[int, typer.Option(min=1, max=20000)] = 32):
+         screen_events: Annotated[int, typer.Option(min=1, max=20000)] = 32,
+         large_chunk: Annotated[int | None, typer.Option(min=1, max=20000)] = None):
     """Write one existing-runner plan per requested scope. Do not launch any analyses."""
     if rounds not in (1, 4):
         raise typer.BadParameter("Use one diagnostic round or four rotated rounds", param_hint="--rounds")
@@ -253,6 +254,8 @@ def main(specification: Path, output: Path,
                                 "payloads": {scope: assets[scope]["path"]},
                                 "provenances": {scope: proofs[scope]["path"]}} for name, arm in active.items()},
         }
+        if large_chunk is not None and scope == "large":
+            plan["physical_chunk"] = large_chunk
         path = output / f"{scope}.json"
         emit(path, plan)
         plans[scope] = identity(path)
