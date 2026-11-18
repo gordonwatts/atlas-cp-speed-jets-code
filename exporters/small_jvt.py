@@ -3,7 +3,6 @@
 The native provider uses the AnalysisBase FastGraph input order and float
 boundaries. The scale-factor histograms become fixed-bin MultiBinning children.
 """
-import argparse
 import hashlib
 import json
 import math
@@ -221,19 +220,3 @@ def export_small_jvt(group_data=DEFAULT_GROUP_DATA, *, root=None):
         },
     }
     return [update, selection, weights], provenance
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--group-data", type=Path, default=DEFAULT_GROUP_DATA)
-    parser.add_argument("--payload", type=Path, required=True)
-    parser.add_argument("--manifest", type=Path, required=True)
-    args = parser.parse_args()
-    corrections, manifest = export_small_jvt(args.group_data)
-    payload = {"schema_version": 3, "corrections": corrections}
-    for path, data in ((args.payload, payload), (args.manifest, manifest)):
-        path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()
