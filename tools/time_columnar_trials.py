@@ -24,9 +24,10 @@ def snapshot():
             "top":subprocess.check_output(["ps","-eo","pid,psr,pcpu,comm","--sort=-pcpu"],text=True).splitlines()[:12]}
 
 
-def wait_for_child(pid):
+def wait_for_child(pid, expected_libraries):
     seen = set()
     samples = 0
+    libraries = {name: set() for name in expected_libraries}
     fd = os.pidfd_open(pid)
     try:
         while True:
@@ -35,7 +36,15 @@ def wait_for_child(pid):
                               if ":" in line)
                 seen.add((int(values["Threads"]), values["Cpus_allowed_list"].strip()))
                 samples += 1
-            except FileNotFoundError:
+                if expected_libraries and not all(libraries.values()):
+                    with Path(f"/proc/{pid}/maps").open() as mapped:
+                        for line in mapped:
+                            fields = line.split(None, 5)
+                            if len(fields) == 6:
+                                candidate = Path(fields[5].strip())
+                                if candidate.name in libraries:
+                                    libraries[candidate.name].add(str(candidate.resolve()))
+            except (FileNotFoundError, ProcessLookupError):
                 pass
             ready, _, _ = select.select([fd], [], [], 0.5)
             if ready:
@@ -43,8 +52,10 @@ def wait_for_child(pid):
         _, status, usage = os.wait4(pid, 0)
     finally:
         os.close(fd)
-    return status, usage, {"samples": samples, "states": sorted(seen),
-                           "passed": seen == {(1, "3")}}
+    loaded = {name: sorted(paths) for name, paths in libraries.items()}
+    library_match = all(libraries[name] == {str(Path(path).resolve())} for name, path in expected_libraries.items())
+    return status, usage, {"samples": samples, "states": sorted(seen), "loaded_libraries": loaded,
+                           "passed": seen == {(1, "3")} and library_match}
 
 def save(path,value):
     with path.open("x") as stream:
@@ -78,7 +89,10 @@ def main(plan:Path, output:Path):
         args = variant.get("options", [])
         if any(arg not in {"--reuse-nominal-nnjvt-update"} for arg in args):
             raise ValueError(f"Unsupported trial options for {name}")
-        receipts[name]={"provider":hashed(variant["provider"]),
+        runtime_python = variant.get("python", config["python"])
+        sdk = variant.get("sdk", config.get("sdk"))
+        receipts[name]={"python":runtime_python, "core":hashed(Path(sdk)/"lib/libcorrectionlib.so") if sdk else None,
+                        "provider":hashed(variant["provider"]),
                         "payloads":{scope:hashed(variant["payloads"][scope]) for scope in active}}
     save(output/"inputs.json",{"plan":config,"digests":receipts,"source_sha256":hashed(config["script"]),
                               "source_snapshot":subprocess.check_output(["git","rev-parse","HEAD"],cwd=root,text=True).strip(),
@@ -97,15 +111,22 @@ def main(plan:Path, output:Path):
                 job=output/f"{r+1:02d}-{scope}-{name}"
                 job.mkdir()
                 result=job/"histogram.npz"
-                command=[config["python"],config["script"],config["input"],str(result.resolve()),
+                sdk = v.get("sdk", config.get("sdk"))
+                job_env = env.copy()
+                expected = {}
+                if sdk:
+                    lib_dir = Path(sdk)/"lib"
+                    job_env["LD_LIBRARY_PATH"] = str(lib_dir) + ":" + env.get("LD_LIBRARY_PATH", "")
+                    expected = {"libjets.so":v["provider"], "libcorrectionlib.so":lib_dir/"libcorrectionlib.so"}
+                command=[v.get("python",config["python"]),config["script"],config["input"],str(result.resolve()),
                          "--provider",v["provider"],"--payload",v["payloads"][scope],
                          "--provenance",config["provenance"],"--scope",scope,"--mode","full","--events",str(events)]
                 command.extend(v.get("options", []))
                 before=snapshot()
                 with (job/"run.log").open("x") as log:
                     start=time.perf_counter()
-                    proc=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,cwd=root)
-                    status,usage,process=wait_for_child(proc.pid)
+                    proc=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=job_env,cwd=root)
+                    status,usage,process=wait_for_child(proc.pid,expected)
                     elapsed=time.perf_counter()-start
                     proc.returncode=os.waitstatus_to_exitcode(status)
                 record={"name":name,"scope":scope,"round":r+1,"command":command,"exit":proc.returncode,
