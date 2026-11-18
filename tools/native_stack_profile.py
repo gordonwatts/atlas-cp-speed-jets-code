@@ -15,7 +15,7 @@ from profile_native import digest, write_json
 HEADER = re.compile(
     r"^\s*(\d+)/(\d+)(?:\s+\[(\d+)\])?\s+(\d+)\.(\d+):\s+(?:(\d+)\s+)?cpu-clock(?::u)?:\s*(.*)$"
 )
-STACK_LINE = re.compile(r"^\s*(?:0x)?[0-9a-fA-F]+\s+(.*)\s+\(([^()]*)\)(?:\s+\(inlined\))?\s*$")
+STACK_LINE = re.compile(r"^\s*((?:0x)?[0-9a-fA-F]+)\s+(.*)\s+\(([^()]*)\)(?:\s+\(inlined\))?\s*$")
 UNKNOWN = ("[unknown]", "[unknown]")
 STAGES = (
     ("joint_jes_jer_jms", "shared", ("JetUncertaintyModel::", "JetUncertaintyNode::")),
@@ -49,10 +49,10 @@ def valid_frames(raw):
     for line in raw:
         frame = STACK_LINE.fullmatch(line)
         if frame:
-            symbol, dso = (value.strip() for value in frame.groups())
+            ip, symbol, dso = (value.strip() for value in frame.groups())
             if symbol.startswith("0x") or symbol == "[unknown]":
                 symbol = "[unknown]"
-            yield dso, symbol
+            yield int(ip, 16), dso, symbol
 
 
 def samples(lines, defects, fixed_period):
@@ -121,7 +121,7 @@ def write_tsv(path, records):
         writer.writerows(records)
 
 
-def summarize_samples(lines, recording):
+def summarize_samples(lines, recording, physical_lines=None):
     timing = recording["measurement"]
     lower, higher = timing["start_ns"], timing["end_ns"]
     pid = recording["pid"]
@@ -130,7 +130,14 @@ def summarize_samples(lines, recording):
     by_stage_self, by_stage_inclusive, by_stage_count = defaultdict(Counter), defaultdict(Counter), Counter()
     stage_traces = defaultdict(Counter)
     fixed_period = recording.get("machine", {}).get("period_ns", 0)
-    for sample in samples(lines, defects, fixed_period):
+    annotated = samples(lines, defects, fixed_period)
+    physical_defects = Counter()
+    joined = ((sample, sample) for sample in annotated) if physical_lines is None else zip(
+        annotated, samples(physical_lines, physical_defects, fixed_period), strict=True)
+    for sample, physical in joined:
+        if (sample.pid, sample.tid, sample.timestamp, sample.period) != (
+                physical.pid, physical.tid, physical.timestamp, physical.period):
+            raise ValueError("Physical and inline views disagree on native sample identity")
         if not lower <= sample.timestamp < higher:
             counts["out_of_processing_window"] += 1
             continue
@@ -144,11 +151,23 @@ def summarize_samples(lines, recording):
         counts["processing"] += 1
         if sample.cpu is not None:
             counts["with_sample_cpu"] += 1
-        frames = sample.frames or [UNKNOWN]
+        dsos = {ip: dso for ip, dso, _ in physical.frames if dso not in ("inlined", "[unknown]")}
+        dsos.update({ip: dso for ip, dso, _ in sample.frames if dso not in ("inlined", "[unknown]")})
+        frames = [(dsos.get(ip, "inlined/unmapped") if dso == "inlined" else dso, name)
+                  for ip, dso, name in sample.frames] or [UNKNOWN]
+        physical_frames = [(dso, name) for _, dso, name in physical.frames]
         leaf = frames[0]
-        stage = owner(frames)
+        if leaf[0] == "inlined/unmapped":
+            counts["inline_leaf_dso_unresolved"] += 1
+        stage = owner(physical_frames or frames)
+        # Optimization may remove a named physical stage wrapper; retain an
+        # exact provider-backed inline symbol as a fallback anchor.
+        if stage not in SCOPE:
+            logical = owner(frames)
+            if logical in SCOPE:
+                stage = logical
         period = sample.period
-        unique = set(frames)
+        unique = set(frames) | set(physical_frames)
         depth = sum(symbol != "[unknown]" for _, symbol in frames)
         resolved_depth[depth] += 1
         if leaf[1] == "[unknown]":
@@ -165,7 +184,8 @@ def summarize_samples(lines, recording):
         # machine stacks remain available in stacks.txt and the folded file.
         if stage in SCOPE:
             trace = [leaf]
-            trace.extend(frame for frame in frames[1:] if frame[0].rsplit("/", 1)[-1].startswith("libjets.so"))
+            trace.extend(frame for frame in physical_frames
+                         if frame[0].rsplit("/", 1)[-1].startswith("libjets.so"))
             stage_traces[stage][tuple(dict.fromkeys(trace))] += period
 
     total = sum(by_stage.values())
@@ -204,7 +224,8 @@ def summarize_samples(lines, recording):
         for stage, traces in stage_traces.items()
     }
     return {
-        "samples": dict(counts), "parse_defects": dict(defects), "resolved_frame_depth_histogram": dict(resolved_depth),
+        "samples": dict(counts), "parse_defects": dict(defects), "physical_parse_defects": dict(physical_defects),
+        "resolved_frame_depth_histogram": dict(resolved_depth),
         "denominator_period_ns": total, "owners": owners, "self": rows(self_weights, total),
         "self_by_dso": libraries,
         "owner_scope_percent": {scope: 100.0 * ns / total for scope, ns in stages_by_scope.items()},
@@ -253,12 +274,14 @@ def summarize(recorded: Path, perf: Path, output: Path | None = None):
             if archived_period is None or int(archived_period[1]) != recording["machine"]["period_ns"]:
                 raise ValueError("Unverified sample period in the stored fixed-period perf capture")
         fields.extend(("ip", "sym", "dso"))
-        with (output / "stacks.txt").open("x", encoding="utf-8") as stream:
-            args = ["script", "--ns", "--demangle", "--inline", "--show-lost-events", "--show-kernel-path"]
-            subprocess.run([*base, *args, "-F", ",".join(fields), "-i", str(raw)],
-                           stdout=stream, stderr=errors, check=True)
-    with (output / "stacks.txt").open(encoding="utf-8", errors="replace") as stream:
-        summary = summarize_samples(stream, recording)
+        for filename, inline in (("stacks.txt", "--inline"), ("physical-stacks.txt", "--no-inline")):
+            with (output / filename).open("x", encoding="utf-8") as stream:
+                args = ["script", "--ns", "--demangle", inline, "--show-lost-events", "--show-kernel-path"]
+                subprocess.run([*base, *args, "-F", ",".join(fields), "-i", str(raw)],
+                               stdout=stream, stderr=errors, check=True)
+    with ((output / "stacks.txt").open(encoding="utf-8", errors="replace") as stream,
+          (output / "physical-stacks.txt").open(encoding="utf-8", errors="replace") as physical):
+        summary = summarize_samples(stream, recording, physical)
     stacks = summary.pop("stack_weights")
     with (output / "stacks.folded").open("x", encoding="utf-8") as folded:
         for frames, period in stacks.most_common():
@@ -274,6 +297,7 @@ def summarize(recorded: Path, perf: Path, output: Path | None = None):
         "passed": bool(
             not summary["samples"].get("unexpected_cpu_or_worker") and
             not summary["parse_defects"].get("lost_events") and
+            not summary["physical_parse_defects"].get("lost_events") and
             summary["concrete_provider_stacks"].get("joint_jes_jer_jms")
         ),
         "clock_window": window, "measurement": timing, "recording": str(recorded / "recording.json"),
@@ -282,8 +306,8 @@ def summarize(recorded: Path, perf: Path, output: Path | None = None):
                              "single audited CPU3 affinity and matching worker PID"),
         "sample_period_basis": ("recorded per sample" if "PERIOD" in recorded_fields else
                                 "fixed positive period verified in the stored event header"),
-        "self_definition": "one leaf per sample; unresolved leaves still count in the denominator",
-        "owner_definition": "nearest identifiable provider stage on the stack; one owner per sample",
+        "self_definition": "one logical leaf per sample; its DSO is resolved by the same physical IP",
+        "owner_definition": "nearest identifiable provider stage, using physical then inline names; one owner per sample",
         "inclusive_definition": "a routine counts once per sample even when recursive; routines overlap on the same stack",
         "artifact": recording["wheel"],
     })
