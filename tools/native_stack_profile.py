@@ -12,7 +12,9 @@ import typer
 
 from profile_native import digest, write_json
 
-HEADER = re.compile(r"^\s*(\d+)/(\d+)\s+\[(\d+)\]\s+(\d+)\.(\d+):\s+(\d+)\s+cpu-clock(?::u)?:\s*(.*)$")
+HEADER = re.compile(
+    r"^\s*(\d+)/(\d+)(?:\s+\[(\d+)\])?\s+(\d+)\.(\d+):\s+(?:(\d+)\s+)?cpu-clock(?::u)?:\s*(.*)$"
+)
 STACK_LINE = re.compile(r"^\s*(?:0x)?[0-9a-fA-F]+\s+(.*)\s+\(([^()]*)\)(?:\s+\(inlined\))?\s*$")
 UNKNOWN = ("[unknown]", "[unknown]")
 STAGES = (
@@ -37,7 +39,7 @@ SCOPE = {stage: scope for stage, scope, _ in STAGES}
 class Sample:
     pid: int
     tid: int
-    cpu: int
+    cpu: int | None
     timestamp: int
     period: int
     frames: list
@@ -53,7 +55,7 @@ def valid_frames(raw):
             yield dso, symbol
 
 
-def samples(lines, defects):
+def samples(lines, defects, fixed_period):
     current = None
     for line in lines:
         line = line.rstrip("\n")
@@ -63,7 +65,9 @@ def samples(lines, defects):
                 yield current
             pid, tid, cpu, sec, frac, period, inline = header.groups()
             timestamp = int(sec) * 1_000_000_000 + int(frac.ljust(9, "0"))
-            current = Sample(int(pid), int(tid), int(cpu), timestamp, int(period), list(valid_frames([inline])))
+            current = Sample(int(pid), int(tid), int(cpu) if cpu is not None else None,
+                             timestamp, int(period) if period is not None else fixed_period,
+                             list(valid_frames([inline])))
         elif "PERF_RECORD_LOST" in line:
             defects["lost_events"] += 1
         elif line.strip() and current is not None:
@@ -125,11 +129,12 @@ def summarize_samples(lines, recording):
     by_stage, self_weights, inclusive_weights, stack_weights = Counter(), Counter(), Counter(), Counter()
     by_stage_self, by_stage_inclusive, by_stage_count = defaultdict(Counter), defaultdict(Counter), Counter()
     stage_traces = defaultdict(Counter)
-    for sample in samples(lines, defects):
+    fixed_period = recording.get("machine", {}).get("period_ns", 0)
+    for sample in samples(lines, defects, fixed_period):
         if not lower <= sample.timestamp < higher:
             counts["out_of_processing_window"] += 1
             continue
-        if sample.pid != pid or sample.tid != pid or sample.cpu != 3:
+        if sample.pid != pid or sample.tid != pid or sample.cpu not in (None, 3):
             counts["unexpected_cpu_or_worker"] += 1
             continue
         if sample.period <= 0:
@@ -137,6 +142,8 @@ def summarize_samples(lines, recording):
             continue
 
         counts["processing"] += 1
+        if sample.cpu is not None:
+            counts["with_sample_cpu"] += 1
         frames = sample.frames or [UNKNOWN]
         leaf = frames[0]
         stage = owner(frames)
@@ -226,16 +233,30 @@ def summarize(recorded: Path, perf: Path, output: Path | None = None):
     window = f"{timing['start_ns'] // 10**9}.{timing['start_ns'] % 10**9:09d},"
     window += f"{timing['end_ns'] // 10**9}.{timing['end_ns'] % 10**9:09d}"
     base = [str(perf)]
-    steps = [
-        ("header.txt", ["report", "--header-only", "--stdio", "-i", str(raw)]),
-        ("buildids.txt", ["buildid-list", "-i", str(raw)]),
-        ("stacks.txt", ["script", "--ns", "--demangle", "--inline", "--show-lost-events", "--show-kernel-path",
-                        "-F", "pid,tid,cpu,time,event,period,ip,sym,dso", "-i", str(raw)]),
-    ]
     with (output / "postprocess.log").open("x", encoding="utf-8") as errors:
-        for name, args in steps:
+        for name, args in (("header.txt", ["report", "--header-only", "--stdio"]), ("buildids.txt", ["buildid-list"])):
             with (output / name).open("x", encoding="utf-8") as stream:
-                subprocess.run([*base, *args], stdout=stream, stderr=errors, check=True)
+                subprocess.run([*base, *args, "-i", str(raw)], stdout=stream, stderr=errors, check=True)
+        header = (output / "header.txt").read_text()
+        discovered = re.search(r"sample_type = ([A-Z_|]+),", header)
+        recorded_fields = set(discovered[1].split("|")) if discovered else set()
+        if not {"IP", "TID", "TIME", "CALLCHAIN"} <= recorded_fields:
+            raise ValueError("Missing required event, time or callchain sample fields in the perf header")
+        fields = ["pid", "tid"]
+        if "CPU" in recorded_fields:
+            fields.append("cpu")
+        fields.extend(("time", "event"))
+        if "PERIOD" in recorded_fields:
+            fields.append("period")
+        else:
+            archived_period = re.search(r"sample_period, sample_freq } = (\d+)", header)
+            if archived_period is None or int(archived_period[1]) != recording["machine"]["period_ns"]:
+                raise ValueError("Unverified sample period in the stored fixed-period perf capture")
+        fields.extend(("ip", "sym", "dso"))
+        with (output / "stacks.txt").open("x", encoding="utf-8") as stream:
+            args = ["script", "--ns", "--demangle", "--inline", "--show-lost-events", "--show-kernel-path"]
+            subprocess.run([*base, *args, "-F", ",".join(fields), "-i", str(raw)],
+                           stdout=stream, stderr=errors, check=True)
     with (output / "stacks.txt").open(encoding="utf-8", errors="replace") as stream:
         summary = summarize_samples(stream, recording)
     stacks = summary.pop("stack_weights")
@@ -256,7 +277,11 @@ def summarize(recorded: Path, perf: Path, output: Path | None = None):
             summary["concrete_provider_stacks"].get("joint_jes_jer_jms")
         ),
         "clock_window": window, "measurement": timing, "recording": str(recorded / "recording.json"),
-        "units": "CPU-clock sample periods in ns, not unprofiled wall-time or per-tool elapsed time",
+        "units": "CPU-clock sample periods in ns",
+        "sample_cpu_basis": ("recorded CPU and worker PID" if "CPU" in recorded_fields else
+                             "single audited CPU3 affinity and matching worker PID"),
+        "sample_period_basis": ("recorded per sample" if "PERIOD" in recorded_fields else
+                                "fixed positive period verified in the stored event header"),
         "self_definition": "one leaf per sample; unresolved leaves still count in the denominator",
         "owner_definition": "nearest identifiable provider stage on the stack; one owner per sample",
         "inclusive_definition": "a routine counts once per sample even when recursive; routines overlap on the same stack",

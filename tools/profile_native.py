@@ -245,7 +245,8 @@ def main(
         histogram = output / "histogram.npz"
         command = [
             str(perf), "record", "--event", machine["event"], "--count", str(machine["period_ns"]),
-            "--clockid", "CLOCK_MONOTONIC", "--timestamp", "--no-inherit", "--no-buildid-cache", "--call-graph",
+            "--clockid", "CLOCK_MONOTONIC", "--timestamp", "--period", "--sample-cpu",
+            "--no-inherit", "--no-buildid-cache", "--call-graph",
             "dwarf,16384", "-o", str(data), "--", str(python.absolute()), str(demo.resolve()), str(original.absolute()),
             str(histogram), "--mode", "full", "--scope", scope, "-n", str(repeat), "--matched-read",
             "--provider", packaged["native"]["libjets.so"]["path"], "--payload", packaged["data"]["jets.json"]["path"],
