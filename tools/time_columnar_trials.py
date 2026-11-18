@@ -48,8 +48,14 @@ def main(plan:Path, output:Path):
     env.pop("PYTHONPATH",None)
     receipts={}
     for name,variant in variants.items():
+        active = variant.get("scopes", scopes)
+        if not set(active).issubset(scopes) or not active:
+            raise ValueError(f"Invalid scope subset for {name}")
+        args = variant.get("options", [])
+        if any(arg not in {"--reuse-nominal-nnjvt-update"} for arg in args):
+            raise ValueError(f"Unsupported trial options for {name}")
         receipts[name]={"provider":hashed(variant["provider"]),
-                        "payloads":{scope:hashed(variant["payloads"][scope]) for scope in scopes}}
+                        "payloads":{scope:hashed(variant["payloads"][scope]) for scope in active}}
     save(output/"inputs.json",{"plan":config,"digests":receipts,"source_sha256":hashed(config["script"]),
                               "source_snapshot":subprocess.check_output(["git","rev-parse","HEAD"],cwd=root,text=True).strip(),
                               "starts":snapshot(),"policy":"Four rounds, first excluded. A one-round diagnostic gives no retained mean."})
@@ -57,8 +63,11 @@ def main(plan:Path, output:Path):
     for r in range(rounds):
         order=scopes[r%len(scopes):]+scopes[:r%len(scopes)]
         for i,scope in enumerate(order):
-            offset=(r+i)%len(names)
-            visit=names[offset:]+names[:offset]
+            available = [name for name in names if scope in variants[name].get("scopes", scopes)]
+            if len(available) < 2:
+                raise ValueError(f"Too few trials for {scope}")
+            offset=(r+i)%len(available)
+            visit=available[offset:]+available[:offset]
             for name in visit:
                 v=variants[name]
                 job=output/f"{r+1:02d}-{scope}-{name}"
@@ -67,6 +76,7 @@ def main(plan:Path, output:Path):
                 command=[config["python"],config["script"],config["input"],str(result.resolve()),
                          "--provider",v["provider"],"--payload",v["payloads"][scope],
                          "--provenance",config["provenance"],"--scope",scope,"--mode","full","--events",str(events)]
+                command.extend(v.get("options", []))
                 before=snapshot()
                 with (job/"run.log").open("x") as log:
                     start=time.perf_counter()
@@ -90,6 +100,8 @@ def main(plan:Path, output:Path):
             metrics[scope]={}
             for name in names:
                 samples=[j["wall_s"] for j in jobs if j["scope"]==scope and j["name"]==name and j["round"]>1]
+                if not samples:
+                    continue
                 mean,median=statistics.mean(samples),statistics.median(samples)
                 sd=statistics.stdev(samples)
                 metrics[scope][name]={"wall_s":samples,"mean":mean,"sample_sd":sd,
