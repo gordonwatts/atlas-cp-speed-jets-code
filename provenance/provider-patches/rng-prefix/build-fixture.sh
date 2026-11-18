@@ -5,6 +5,13 @@ variant=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$variant/../../.." && pwd)
 output=$(realpath -m "${1:?Provide a new isolated result directory}")
 revision=$(cat "$variant/base-revision.txt")
+slots=${2:-65536}
+cache_flags=()
+case "$slots" in
+  65536) ;;
+  262144) cache_flags+=(-DJETS_RNG_CACHE_LARGE) ;;
+  *) echo "Select exactly 65536 or 262144 fixture cache slots" >&2; exit 2 ;;
+esac
 mkdir "$output"
 exec > "$output/build.log" 2>&1
 trap 'printf "%s\n" "$?" > "$output/build-exit-code"' EXIT
@@ -22,8 +29,9 @@ for arm in baseline candidate; do
 done
 patch --directory "$output/candidate" --strip 1 --fuzz 0 < "$variant/integration.diff"
 flags=(-std=c++20 -O2 -g -ffp-contract=off -frounding-math -DJETS_PORTABLE -DJETS_RNG_CACHE
-       -DJETS_RNG_CACHE_DIAGNOSTICS -I"$externals/include" -L"$externals/lib" -Wl,-rpath,"$externals/lib")
+       -DJETS_RNG_CACHE_DIAGNOSTICS "${cache_flags[@]}" -I"$externals/include" -L"$externals/lib" -Wl,-rpath,"$externals/lib")
 printf '%s\n' "${flags[@]}" > "$output/flags.txt"
+printf '%s\n' "$slots" > "$output/cache-slots.txt"
 for arm in baseline candidate; do
   option=()
   if [[ $arm == candidate ]]; then option=(-DJETS_RNG_PREFIX); fi
@@ -38,4 +46,5 @@ for artifact in "$output"/{resolution-baseline,resolution-candidate,raw-and-gaus
 done
 sha256sum "$variant"/{base-revision.txt,base.sha256,integration.diff,fixture.cxx,build-fixture.sh} \
   "$output"/{baseline,candidate}/{portable/random.h,portable/test_resolution_cache.cxx,provider/jet_smearing.h} \
-  "$output"/{resolution-baseline,resolution-candidate,raw-and-gaussian} > "$output/inputs.sha256"
+  "$output"/{resolution-baseline,resolution-candidate,raw-and-gaussian,flags.txt,cache-slots.txt} \
+  > "$output/inputs.sha256"

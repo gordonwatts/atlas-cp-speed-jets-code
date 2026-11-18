@@ -1,9 +1,8 @@
 # Original-stream MT19937 prefix on cache misses
 
-This is a source-only isolated trial. The active provider, wheel and benchmark
-controller do not use it. The patch changes the portable provider only when
-`JETS_RNG_PREFIX`, `JETS_PORTABLE` and `JETS_RNG_CACHE` are defined together.
-The fixture stages both sets of headers under a fresh output directory.
+The optional portable trial activates when `JETS_RNG_PREFIX`,
+`JETS_PORTABLE` and `JETS_RNG_CACHE` are defined together. The fixture stages
+both sets of headers under a fresh output directory.
 
 ## What the packed profile leaves to remove
 
@@ -31,10 +30,10 @@ made 1,352,612 misses on 5,321,414 requests, compared with 14,084 misses on
 Those are distinct earlier diagnostics, not counters from bundle-005. They
 support testing small and combined first and treating large as lower payoff.
 
-With all tail promotions excluded, the arithmetic removes 195ºw^~)Þw225 of 623
-initialization updates and 608ºw^~)Þw623 of 624 twist words, depending on how many
+With all tail promotions excluded, the arithmetic removes 195-225 of 623
+initialization updates and 608-623 of 624 twist words, depending on how many
 words a normal requests. Applying those fractions to each of the sampled
-leaf groups gives a work-proportional illustration of roughly 4.54.9% of
+leaf groups gives a work-proportional illustration of roughly 4.5-4.9% of
 the packed processing window before new cursor, continuation and code-layout
 costs. These fractions are not supported as time coefficients. A focused
 measurement would determine whether the mechanism warrants a full pair.
@@ -65,7 +64,7 @@ narrowing even when the resulting initial word is zero. The true zero seed
 stays excluded from the portable generator.
 
 For the scalar 32-bit initialization, `s[0]` is that narrowed seed and
-`s[j] = 1812433253 × (s[j1] xor (s[j1] >> 30)) + j` modulo 2^32.
+`s[j] = 1812433253 * (s[j-1] xor (s[j-1] >> 30)) + j` modulo 2^32.
 The first twist uses the original `s[i]`, `s[i+1]` and `s[i+397]` for
 `0 <= i < 227`, before any of those inputs has been overwritten. It joins
 the top bit of `s[i]` with the lower 31 bits of `s[i+1]`, shifts right,
@@ -74,7 +73,7 @@ XORs with `s[i+397]`. It applies the unchanged four tempering operations.
 The implementation advances two unsigned 32-bit cursors and creates no
 state array. It advances the high cursor to `s[397]` once, then delays
 further recurrence steps until the next raw word is requested. A prefix of
-`k` words therefore does `397 + k + (kºw^~)Þv1)` recurrence operations and
+`k` words therefore does `397 + k + (k-1)` recurrence operations and
 `k` twists. A fixed limit of 16 is safely below the first-loop boundary.
 
 The Gaussian uses the same source operations in both implementations,
@@ -94,7 +93,7 @@ keeps its current calls.
 The exact algorithms are visible in the pinned libstdc++ 15.2
 `bits/random.tcc` seed, first twist loop and tempering, and the ROOT
 sources below. The release linked by the fixture remains the authority
-for the uniform-to-Gaussian calculation. [Pinned ROOT TRandom3](https://github.com/root-project/root/blob/d4c0003542952bec9c4edc86c419784a32875e9d/math/mathcore/src/TRandom3.cxx) · [ROOT 6.40 Gaussian source](https://root.cern/doc/v640/TRandom_8cxx_source.html)
+for the uniform-to-Gaussian calculation. [Pinned ROOT TRandom3](https://github.com/root-project/root/blob/d4c0003542952bec9c4edc86c419784a32875e9d/math/mathcore/src/TRandom3.cxx) | [ROOT 6.40 Gaussian source](https://root.cern/doc/v640/TRandom_8cxx_source.html)
 
 ## Focused verification recipe
 
@@ -127,5 +126,38 @@ endpoints. Use the same flags, cache size, data, corrections, script and
 histogram work. A macro-off build of the patched shared uniform adapter can
 check for code-layout effects separately from the already accepted baseline.
 
-No build, fixture, model execution, profiling or timing was performed for
-this source-only package.
+## CPU5 build and CPU3 screen or confirmation
+
+The trial integration is already present at `79d6d00`. On a fresh checkout
+without the integration, run
+`git apply --check provenance/provider-patches/rng-prefix/integration.diff`
+followed by `git apply provenance/provider-patches/rng-prefix/integration.diff`.
+Use the `rng-prefix` build choice from the integration commit.
+
+Run separately when each slot is authorized.
+
+```bash
+bash tools/qualify_rng_prefix.sh trial-001 build 32
+bash tools/qualify_rng_prefix.sh trial-001 screen
+bash tools/qualify_rng_prefix.sh trial-001 confirm
+```
+
+Build produces `results/build/rng-prefix-{off,on}-trial-001` on CPU5. The
+frozen options in both arms are `rng-cache-large` and `fast-variable-flow`.
+Only the on arm adds `rng-prefix`. The shared builder rejects combining
+`rng-cache` with `rng-cache-large`. Both arms use the exact packed canonical
+payload, the same precision SDK and nominal NNJVT update reuse in all
+applicable scopes. The 262,144-entry fixture flag matches the 4 MiB runtime
+cache. Build only compiles and freezes receipts.
+
+The CPU3 screen compares the release RNG fixtures and independently checks
+both arms against stock for small-R, large-R and combined. It runs one full
+20,000-event visit in each arm and scope. There is no retained single-round
+estimate. The wrapper compares every histogram field bit for bit and checks
+original file identity, branch identity, loaded libraries and single-thread
+placement. It seals the four-round plan only after the screen succeeds.
+Confirmation requires that same screen, six object proofs and exact full
+histograms. It runs 24 rotated workflow visits, excludes the first round and
+retains three. Both plans, flags, proofs and process receipts are in
+`results/diagnostics/rng-prefix-trial-001`. Review the spread and guest
+resource conditions before qualifying the timings.
