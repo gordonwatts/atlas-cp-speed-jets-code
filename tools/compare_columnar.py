@@ -13,7 +13,7 @@ if str(CHECKOUT) not in sys.path:
     sys.path.insert(0, str(CHECKOUT))
 
 from columnar.jets import (
-    EVENT_FIELDS, STAGES, WEIGHT_DIRECTIONS, Mode, Scope, check_execution, chunk_bounds,
+    EVENT_FIELDS, OUT_OF_VALIDITY, STAGES, VALID, WEIGHT_DIRECTIONS, Mode, Scope, check_execution, chunk_bounds,
     evaluate_chunk, ff_states, load_corrections, native_runtime, select_states, selected_collections,
 )
 from columnar.inputs import (
@@ -279,6 +279,11 @@ def main(
         "runtime": native_runtime(provider) if nodes is not None else None,
         "entries_requested": entries, "entries_compared": events_seen,
         "states": states, "observer_branches_comparable": len(expected),
+        "status_encoding": {"0": "absent", str(VALID): "valid", str(OUT_OF_VALIDITY): "out_of_validity"},
+        "large_r_jmr_execution": (
+            {state: "evaluated" if state in ff_names else "structurally_absent" for state in states["lr"]}
+            if mode != Mode.stored and stage == "final" and "lr" in states else None
+        ),
         "source_branches_read": sorted({value for value in raw.values() if value is not None}),
         "first_mismatching_stage": first_stage, "mismatching_branches_by_stage": dict(by_stage),
         "execution_failure": failure, "checks": diagnostic.checks, "histogram": histogram,
