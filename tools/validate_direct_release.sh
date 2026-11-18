@@ -21,6 +21,15 @@ for setting in OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS NUMEXPR_NUM_
   export "$setting=1"
 done
 unset PYTHONHOME PYTHONPATH
+site=$("$py" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+packaged_lib="$site/correctionlib/lib"
+if [[ "$provider" == "$packaged_lib/libjets.so" ]]; then
+  # The checkout observer imports Awkward before CorrectionLib. Match the
+  # visible script bootstrap before either library can load the system C++ ABI.
+  test -s "$packaged_lib/libstdc++.so.6"
+  export LD_LIBRARY_PATH="$packaged_lib"
+fi
+printf 'LD_LIBRARY_PATH=%s\n' "${LD_LIBRARY_PATH:-}" > "$out/diagnostic-environment.txt"
 original=$(sed -n 's/^export JETS_REFERENCE_INPUT=//p' tools/reference/setup.sh)
 stock="$root/results/reference/full-clean-001/reference.root"
 energy="$root/results/build/columnar-alias-energy-portable-001/libcolumnar-alias-energy.so"
