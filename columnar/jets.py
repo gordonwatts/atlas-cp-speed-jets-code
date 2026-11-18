@@ -128,9 +128,10 @@ def native_runtime(provider):
     provider_path = provider.resolve(strict=True)
     if provider_path not in mapped:
         raise RuntimeError(f"Requested jet provider is absent from /proc/self/maps: {provider_path}")
-    used = ("libcorrectionlib.so", "_core.cpython", "libJetCalibToolsLib", "libJetUncertaintiesLib", "liblwtnn")
+    used = ("libcorrectionlib.so", "libJetCalibToolsLib", "libJetUncertaintiesLib", "liblwtnn")
     return {"core": str(expected), "provider": str(provider_path),
-            "mapped": sorted(str(path) for path in mapped if path.name.startswith(used))}
+            "mapped": sorted(str(path) for path in mapped if path.name.startswith(used) or
+                             (path.parent == package and path.name.startswith("_core.cpython")))}
 
 
 def load_corrections(provider, payload, need_transport=True):
@@ -372,7 +373,10 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
                 valid_combined = status_bits(varied[:, 4], varied[:, 5], f"{prefix} {state} uncertainty")
                 p4 = varied[:, :4]
                 if diagnose and not (is_ff or is_weight_only):
-                    yield Frame(prefix, "uncert", state, counts, p4_fields("uncert", p4))
+                    intermediate = p4_fields("uncert", p4)
+                    if stages_only:
+                        intermediate[validity_field] = valid_combined
+                    yield Frame(prefix, "uncert", state, counts, intermediate)
                 if stages_only:
                     continue
 

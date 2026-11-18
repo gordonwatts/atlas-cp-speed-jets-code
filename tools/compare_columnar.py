@@ -69,7 +69,10 @@ def reference_branches(selected, states, ff_names, requested_stage, mode):
             compare_stages = (requested_stage,)
         for stage in compare_stages:
             for state in states[prefix] if stage in ("uncert", "final") else ("NOSYS",):
-                for field in stage_names(prefix, state, stage, ff_names):
+                fields = stage_names(prefix, state, stage, ff_names)
+                if fields and requested_stage == "uncert":
+                    fields.append("jesJerValidity" if prefix == "sr" else "jesJERJMSValidity")
+                for field in fields:
                     branches[f"{prefix}_{field}_{state}"] = stage
     return branches
 
