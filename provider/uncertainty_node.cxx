@@ -26,18 +26,21 @@ struct InputIndex {
   std::size_t systematic;
 };
 
-std::array<double, 4> read_p4(const Inputs& values, const std::array<std::size_t, 4>& index) {
+template<typename Row>
+std::array<double, 4> read_p4(const Row& values, const std::array<std::size_t, 4>& index) {
   return {std::get<double>(values.at(index[0])), std::get<double>(values.at(index[1])),
           std::get<double>(values.at(index[2])), std::get<double>(values.at(index[3]))};
 }
 
-bool read_flag(const Inputs& values, std::size_t index) {
+template<typename Row>
+bool read_flag(const Row& values, std::size_t index) {
   const auto value = std::get<std::int64_t>(values.at(index));
   if (value != 0 && value != 1) throw std::invalid_argument("Jet uncertainty flag must be zero or one");
   return value != 0;
 }
 
-std::optional<int> read_truth_label(const Inputs& values, std::size_t index, std::size_t availability) {
+template<typename Row>
+std::optional<int> read_truth_label(const Row& values, std::size_t index, std::size_t availability) {
   if (!read_flag(values, availability)) return std::nullopt;
   const auto label = std::get<std::int64_t>(values.at(index));
   if (label < std::numeric_limits<int>::min() || label > std::numeric_limits<int>::max()) {
@@ -59,6 +62,33 @@ class JetUncertaintyNode final : public correction::PluginNode {
 
   void evaluate_array(const Inputs& values, double* output, std::size_t size) const override {
     if (!output || size < output_size()) throw std::invalid_argument("Jet uncertainty output is too small");
+    const auto& systematic = std::get<std::string>(values.at(indices_.systematic));
+    write_result(model_.evaluate(read_input(values), systematic), output);
+  }
+
+#ifdef JETS_UNCERTAINTY_BATCH
+  void evaluate_batch_array(const std::vector<correction::BatchInput>& inputs, size_t rows,
+                            double* output, size_t size) const override {
+    if (rows > size / uncertainty_output_count || (rows && !output))
+      throw std::invalid_argument("Jet uncertainty batch output is too small");
+    if (!rows) return;
+    // The SDK supports numeric columns and scalar strings. Systematic request
+    // lookup therefore happens once, and unused optional values need no packing.
+    const auto state = std::get<std::string>(inputs.at(indices_.systematic).at(0));
+    const auto selected = model_.select(state);
+    struct Row {
+      const std::vector<correction::BatchInput>& inputs;
+      size_t index;
+      correction::Variable::Type at(size_t column) const { return inputs.at(column).at(index); }
+    };
+    for (size_t row = 0; row < rows; ++row)
+      write_result(selected(read_input(Row{inputs,row})), output + row * uncertainty_output_count);
+  }
+#endif
+
+ private:
+  template<typename Row>
+  jets::JetUncertaintyInput read_input(const Row& values) const {
     jets::JetUncertaintyInput input{
         read_p4(values, indices_.p4),
         static_cast<float>(std::get<double>(values.at(indices_.average_mu))),
@@ -69,8 +99,10 @@ class JetUncertaintyNode final : public correction::PluginNode {
         read_truth_label(values, indices_.large_r_truth_label, indices_.large_r_truth_label_available),
         std::nullopt};
     if (read_flag(values, indices_.calo_available)) input.calo_scale = read_p4(values, indices_.calo_p4);
-    const auto& systematic = std::get<std::string>(values.at(indices_.systematic));
-    const auto result = model_.evaluate(input, systematic);
+    return input;
+  }
+
+  static void write_result(const jets::JetUncertaintyResult& result, double* output) {
     std::copy(result.p4.begin(), result.p4.end(), output);
     output[4] = result.status ? static_cast<double>(*result.status) : std::numeric_limits<double>::quiet_NaN();
     output[5] = result.status.has_value() ? 1.0 : 0.0;
@@ -78,7 +110,6 @@ class JetUncertaintyNode final : public correction::PluginNode {
     output[7] = result.is_bjet.has_value() ? 1.0 : 0.0;
   }
 
- private:
   InputIndex indices_;
   jets::JetUncertaintyModel model_;
 };

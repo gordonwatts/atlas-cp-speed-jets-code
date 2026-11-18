@@ -187,9 +187,13 @@ struct JetUncertaintyModel::Impl {
     throw std::logic_error("Invalid component type");
   }
 
-  JetUncertaintyResult evaluate(const JetUncertaintyInput& input,const std::string& systematic) const {
-    const auto state=states.find(systematic);
-    bool pseudo=state!=states.end() && state->second.pseudo;
+  const State* select(const std::string& systematic) const {
+    const auto found=states.find(systematic);
+    return found==states.end() ? nullptr : &found->second;
+  }
+
+  JetUncertaintyResult evaluate(const JetUncertaintyInput& input,const State* state) const {
+    bool pseudo=state && state->pseudo;
     JetUncertaintyResult out{input.p4,std::nullopt,std::nullopt};
     if(!pseudo) out.is_bjet=input.parton_truth_label==5;
     if(!input.preselected) return out;
@@ -198,8 +202,8 @@ struct JetUncertaintyModel::Impl {
     Coordinates coords(input,energy_scale);
     out.status=JetUncertaintyStatus::out_of_validity;
     if(file_validity && !valid(file_validity->getValue(coords.pt,coords.mass(true)*energy_scale,coords.eta))) return out;
-    if(state!=states.end()) {
-      const auto& group=*state->second.group;
+    if(state) {
+      const auto& group=*state->group;
       for(const auto& [scale,pieces]:group.pieces) {
         for(const auto& c:pieces) {
           if(c.param==Param::energy_log_mass_abs_eta && !(coords.mass_over_energy(c.calo)>0)) return out;
@@ -213,7 +217,7 @@ struct JetUncertaintyModel::Impl {
           uncertainty+=group.quadrature && pieces.size()>1 ? std::pow(v,2) : v;
         }
         if(group.quadrature && pieces.size()>1) uncertainty=std::sqrt(uncertainty);
-        uncertainty*=state->second.sign;
+        uncertainty*=state->sign;
         double pt_factor=1.0, mass_factor=1.0;
         if(scale==Scale::four_vector) pt_factor=mass_factor=1.0+uncertainty;
         else if(scale==Scale::mass) mass_factor=1.0+uncertainty;
@@ -233,6 +237,12 @@ struct JetUncertaintyModel::Impl {
 JetUncertaintyModel::JetUncertaintyModel(const correction::PluginConfig& config):model_(std::make_unique<Impl>(config)) {}
 JetUncertaintyModel::~JetUncertaintyModel()=default;
 JetUncertaintyResult JetUncertaintyModel::evaluate(const JetUncertaintyInput& input,const std::string& systematic) const {
-  return model_->evaluate(input,systematic);
+  return model_->evaluate(input,model_->select(systematic));
 }
+#ifdef JETS_UNCERTAINTY_BATCH
+JetUncertaintyModel::Selected JetUncertaintyModel::select(const std::string& systematic) const {
+  const State* state=model_->select(systematic);
+  return [this,state](const JetUncertaintyInput& input){ return model_->evaluate(input,state); };
+}
+#endif
 } // namespace jets

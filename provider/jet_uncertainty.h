@@ -1,6 +1,9 @@
 #pragma once
 
 #include <array>
+#ifdef JETS_UNCERTAINTY_BATCH
+#include <functional>
+#endif
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,6 +41,12 @@ class JetUncertaintyModel {
   ~JetUncertaintyModel();
 
   JetUncertaintyResult evaluate(const JetUncertaintyInput& input, const std::string& systematic) const;
+#ifdef JETS_UNCERTAINTY_BATCH
+  // BatchInput carries a single string for the entire batch. The returned
+  // caller borrows this immutable model and must finish before its destruction.
+  using Selected = std::function<JetUncertaintyResult(const JetUncertaintyInput&)>;
+  Selected select(const std::string& systematic) const;
+#endif
 
  private:
   struct Impl;
