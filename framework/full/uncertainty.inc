@@ -32,8 +32,8 @@
             return large_call;
         }();
 
-        Values inputs;
-        inputs.reserve(18);
+        jets::framework::ScalarInputs input_storage(18);
+        Values& inputs = input_storage.values();
         assigned.append(jet, inputs);
         inputs.emplace_back(static_cast<double>(eInfo.averageInteractionsPerCrossing()));
         inputs.emplace_back(npv.isAvailable(eInfo) ? static_cast<double>(npv(eInfo)) : -1.);

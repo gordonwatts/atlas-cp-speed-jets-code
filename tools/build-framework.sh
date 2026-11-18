@@ -11,6 +11,19 @@ fi
 sdk=${2:-"$root/results/build/core-001/venv/lib/python3.14/site-packages/correctionlib"}
 sdk=$(realpath "$sdk")
 jets_framework_profile=${3:-nominal}
+jets_framework_choice=${4:-baseline}
+jets_framework_cmake_options=()
+case "$jets_framework_choice" in
+  baseline) ;;
+  reuse-inputs)
+    if [[ "$jets_framework_profile" != full ]]; then
+      echo "Input reuse requires the full framework profile" >&2
+      exit 2
+    fi
+    jets_framework_cmake_options+=(-DCMAKE_CXX_FLAGS=-DJETS_FRAMEWORK_REUSE_INPUTS)
+    ;;
+  *) echo "Unknown framework build choice $jets_framework_choice" >&2; exit 2 ;;
+esac
 jets_framework_targets=(JetCalibToolsLib)
 jets_framework_libraries=(libJetCalibToolsLib.so libJetsCorrectionRuntime.so)
 case "$jets_framework_profile" in
@@ -46,9 +59,14 @@ test -s "$sdk/lib/libcorrectionlib.so"
 export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1
 grep Cpus_allowed_list /proc/self/status
 sha256sum "$sdk/lib/libcorrectionlib.so" > evaluator.sha256
+printf '%s\n' "$jets_framework_choice" > build-choice.txt
+printf '%s\n' "${jets_framework_cmake_options[@]}" > candidate-cmake-flags.txt
+git -C "$root" rev-parse HEAD > source-revision.txt
+find "$root/framework" -type f \( -name 'CMakeLists.txt' -o -name '*.py' -o -name '*.h' -o -name '*.icc' \
+  -o -name '*.inc' -o -name '*.cxx' \) -print0 | sort -z | xargs -0 sha256sum > framework-source.sha256
 python "$root/framework/prepare.py" "$release" "$dest" "$root/framework" "$jets_framework_profile"
 cmake -S src/Projects/WorkDir -B build -DATLAS_PROJECT=AnalysisBase \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo -Dcorrectionlib_DIR="$sdk/cmake"
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo -Dcorrectionlib_DIR="$sdk/cmake" "${jets_framework_cmake_options[@]}"
 cmake --build build --target "${jets_framework_targets[@]}" --parallel 1
 
 # Only the rebuilt implementation and its CorrectionLib client enter the

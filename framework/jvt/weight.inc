@@ -13,10 +13,10 @@
                 {"pt", "eta", "pass", "is_jvt_hs", "variation", "preselected"});
             const std::int64_t truth = m_accIsHS && m_accIsHS->isAvailable(jet)
                 ? std::int64_t((*m_accIsHS)(jet) != 0) : -1;
-            const jets::framework::Values inputs{jet.pt(), double(m_etaAcc(jet)),
+            jets::framework::ScalarInputs inputs{jet.pt(), double(m_etaAcc(jet)),
                 std::int64_t(passed), truth, std::int64_t(m_appliedSysSigma), std::int64_t(1)};
             double result[3];
-            scale_factor.array(inputs, result, 3);
+            scale_factor.array(inputs.values(), result, 3);
             if (result[1] == 1 || result[1] == 2) {
                 sf = static_cast<float>(result[0]);
                 return result[1] == 1 ? CorrectionCode::Ok : CorrectionCode::OutOfValidityRange;

@@ -26,10 +26,10 @@
                     features = 1;
                 }
             }
-            const jets::framework::Values inputs{jet->pt(), jet->eta(), double(track_sum),
+            jets::framework::ScalarInputs inputs{jet->pt(), jet->eta(), double(track_sum),
                                                double(corr_jvf), vertex, features};
             double result[4];
-            update.array(inputs, result, 4);
+            update.array(inputs.values(), result, 4);
             if (result[3] == 0) continue;  // Empty track vector: preserve inherited decorations.
             if (result[3] != 1) {
                 ATH_MSG_ERROR("CorrectionLib NNJvt update returned an error");

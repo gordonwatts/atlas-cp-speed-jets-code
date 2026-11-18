@@ -13,6 +13,62 @@ namespace jets::framework {
 
 using Values = std::vector<correction::Variable::Type>;
 
+// Own the input values for the synchronous correction call. The optional
+// build keeps capacity per thread and uses an independent vector for a
+// nested call until the outer call releases its borrow.
+class ScalarInputs {
+public:
+  explicit ScalarInputs(std::size_t capacity) {
+#ifdef JETS_FRAMEWORK_REUSE_INPUTS
+    static thread_local Scratch per_thread;
+    if (!per_thread.borrowed) {
+      per_thread.values.reserve(capacity);
+      per_thread.borrowed = true;
+      scratch_ = &per_thread;
+      return;
+    }
+#endif
+    owned_.reserve(capacity);
+  }
+
+#ifdef JETS_FRAMEWORK_REUSE_INPUTS
+  explicit ScalarInputs(std::initializer_list<correction::Variable::Type> inputs)
+      : ScalarInputs(inputs.size()) {
+    values().assign(inputs);
+  }
+
+  ~ScalarInputs() {
+    if (scratch_) {
+      scratch_->values.clear();
+      scratch_->borrowed = false;
+    }
+  }
+#else
+  explicit ScalarInputs(std::initializer_list<correction::Variable::Type> inputs)
+      : owned_(inputs) {}
+#endif
+
+  ScalarInputs(const ScalarInputs&) = delete;
+  ScalarInputs& operator=(const ScalarInputs&) = delete;
+
+  Values& values() noexcept {
+#ifdef JETS_FRAMEWORK_REUSE_INPUTS
+    if (scratch_) return scratch_->values;
+#endif
+    return owned_;
+  }
+
+private:
+  Values owned_;
+#ifdef JETS_FRAMEWORK_REUSE_INPUTS
+  struct Scratch {
+    Values values;
+    bool borrowed = false;
+  };
+  Scratch* scratch_ = nullptr;
+#endif
+};
+
 class CorrectionCall {
 public:
   CorrectionCall(correction::Correction::Ref correction, bool tracing);
