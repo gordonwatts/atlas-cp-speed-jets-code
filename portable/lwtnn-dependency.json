@@ -1,0 +1,30 @@
+{
+  "library": "lwtnn",
+  "version": "2.14.1",
+  "upstream_commit": "102b58d95ca5cb926a87fae0ef0b88583ec4abad",
+  "source_url": "https://cern.ch/atlas-software-dist-eos/externals/lwtnn/v2.14.1.tar.gz",
+  "source_md5_from_release": "0f85d1154e1dbb213e46765368bb6e77",
+  "source_sha256": "e0ec31f7129014324b91d2b7a6380bf1e9c571fa4b39577112192255d4fa83a9",
+  "license": "MIT",
+  "license_file": "LICENCE",
+  "license_sha256": "416d6bfb9283c5e9aecfac36a754184f24c35ab76f05fe09e5016e4413448ec4",
+  "release": {
+    "project": "AnalysisBaseExternals/25.2.117",
+    "platform": "x86_64-el9-gcc15-opt",
+    "recipe": "src/External/lwtnn/CMakeLists.txt",
+    "recipe_sha256": "72ff859f5791d49b8d5b8c7ce4b6ff216e303927d5714b33f9073bbd4b488c49",
+    "patch": null,
+    "shared_library_sha256": "0f7408a71ce94eaba4b0c14d6dfe9fd0c00ca705d32e2acc83ecd1cd6df7a9bd",
+    "static_library_sha256": "74b154011275faca9f9b16562ddddf8f39cee351255e50749dfcfdb63ba43f57"
+  },
+  "pic_build": {
+    "archive": "build/lib/liblwtnn-stat.a",
+    "gcc_version": "11.3.1",
+    "eigen_version": "3.4.1",
+    "boost_headers_version": "1.91.0",
+    "cmake_options": ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON", "-DCMAKE_CXX_FLAGS=-ffp-contract=off"],
+    "cmake_target": "lwtnn-stat",
+    "small_jvt_translation_unit_flag": "-fvisibility=hidden",
+    "provider_link_flag": "-Wl,--exclude-libs,liblwtnn-stat.a"
+  }
+}

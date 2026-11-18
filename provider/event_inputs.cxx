@@ -1,7 +1,6 @@
 #include "event_inputs.h"
 #include "truth_context.h"
 
-#include <TLorentzVector.h>
 #include <correction_plugin.h>
 
 #include <algorithm>

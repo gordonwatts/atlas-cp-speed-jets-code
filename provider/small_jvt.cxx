@@ -1,8 +1,8 @@
 #include "small_jvt.h"
 
+#include "../portable/lwtnn.h"
+
 #include <correction_plugin.h>
-#include <lwtnn/generic/FastGraph.hh>
-#include <lwtnn/parse_json.hh>
 #include <rapidjson/document.h>
 
 #include <algorithm>
@@ -22,7 +22,7 @@ using correction::PluginNode;
 using correction::Variable;
 using Values = std::vector<Variable::Type>;
 using Json = rapidjson::Value;
-using Network = lwt::generic::FastGraph<double>;
+using Network = jets::portable::JvtNetwork;
 
 enum Status : int { error = -1, skipped = 0, ok = 1, out_of_validity = 2 };
 
@@ -211,9 +211,9 @@ public:
     size_t pt_bin, eta_bin;
     if (!(pt <= max_pt_) || !cuts_.bins(pt, eta, pt_bin, eta_bin)) return;
 
-    lwt::VectorX<double> inputs(4);
+    jets::portable::JvtNetworkFeatures inputs(4);
     inputs << rpt, as_float(values, jvf_), static_cast<float>(pt_bin), static_cast<float>(eta_bin);
-    const auto predicted = network_->compute(lwt::generic::NodeVec<double>{std::move(inputs)});
+    const auto predicted = network_->compute(jets::portable::JvtNetworkNodes{std::move(inputs)});
     const float score = static_cast<float>(predicted(0));
     output[0] = score;
     output[2] = score > cuts_.cuts[pt_bin][eta_bin];

@@ -1,9 +1,8 @@
 #include "small_gsc.h"
 
-#include "histogram.h"
+#include "jet_histogram.h"
 #include "jet_common.h"
 
-#include <TH2.h>
 #include <correction_plugin.h>
 #include <rapidjson/document.h>
 
@@ -12,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -22,9 +22,9 @@ using correction::Variable;
 using Values = std::vector<Variable::Type>;
 
 enum Family : size_t { charged, tile0, em3, n_track, width, n_families };
-using Tables = std::array<std::vector<std::unique_ptr<const TH2>>, n_families>;
+using Tables = std::array<std::vector<std::unique_ptr<const jets::CalibrationHistogram>>, n_families>;
 
-double axis_coordinate(const TAxis& axis, double coordinate, double offset) {
+double axis_coordinate(const jets::CalibrationAxis& axis, double coordinate, double offset) {
   const int bin = axis.FindBin(coordinate);
   if (bin < axis.GetFirst()) return axis.GetBinLowEdge(axis.GetFirst()) + offset;
   if (bin > axis.GetLast()) return axis.GetBinUpEdge(axis.GetLast()) - offset;
@@ -37,7 +37,7 @@ struct Recipe {
   double mev_per_gev;
   double edge_offset;
 
-  double interpolate(const TH2& table, double pt, double moment) const {
+  double interpolate(const jets::CalibrationHistogram& table, double pt, double moment) const {
     return table.Interpolate(axis_coordinate(*table.GetXaxis(), pt, edge_offset),
                              axis_coordinate(*table.GetYaxis(), moment, edge_offset));
   }
@@ -84,11 +84,10 @@ Recipe read_recipe(const PluginConfig& config) {
         responses[names[i]].Size() < 3)
       throw std::invalid_argument("missing small-R GSC response family");
     for (const auto& record : responses[names[i]].GetArray()) {
-      auto histogram = jets::restore_histogram(record);
-      auto* table = dynamic_cast<TH2F*>(histogram.get());
-      if (!table) throw std::invalid_argument("small-R GSC requires a TH2F response");
-      histogram.release();
-      recipe.response[i].emplace_back(table);
+      auto table = jets::restore_calibration_histogram(record);
+      if (std::string_view(table->ClassName()) != "TH2F")
+        throw std::invalid_argument("small-R GSC requires a TH2F response");
+      recipe.response[i].emplace_back(std::move(table));
     }
   }
   return recipe;
