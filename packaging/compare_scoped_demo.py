@@ -17,6 +17,7 @@ from benchmark import check_quality, check_pair, run_leg
 
 APP = typer.Typer(add_completion=False)
 BRANCH_DIGEST = "Input branch SHA-256:"
+PROJECTION_RECEIPTS = {"sha256": "Payload materialized SHA-256: ", "bytes": "Payload materialized bytes: "}
 
 
 class Scope(str, Enum):
@@ -49,6 +50,24 @@ def branch_digest(log: Path) -> str:
     return value
 
 
+def installed_index(installation: Path) -> dict:
+    path, = (installation / "pip/env/lib").glob("python*/site-packages/atlas_jet_demo/data/payload-index.json")
+    return json.loads(path.read_text())["scopes"]
+
+
+def projection_receipt(log: Path, expected: dict | None) -> dict:
+    lines = log.read_text().splitlines()
+    found = {key: [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
+             for key, prefix in PROJECTION_RECEIPTS.items()}
+    if expected is None:
+        if any(found.values()):
+            raise ValueError(f"Unexpected projected payload in {log}")
+        return {}
+    if any(found[key] != [str(expected[key])] for key in found):
+        raise ValueError(f"Projection byte identity differs from the checked index in {log}")
+    return {key: expected[key] for key in found}
+
+
 def compare(expected: Path, actual: Path) -> None:
     import numpy as np
 
@@ -78,6 +97,7 @@ def check(
     scope: Scope,
     output: Path,
     events: Annotated[int, typer.Option(min=1)] = 32,
+    verify_projection_identity: bool = False,
 ) -> None:
     """Verify both pristine front ends through the packaged compact CLI and stock histograms."""
     require_cpu()
@@ -91,12 +111,18 @@ def check(
         ("uv", "indexed-full", "full", ["--compact-payload"]),
     ]
     digests = {}
+    projections = {}
+    if verify_projection_identity:
+        expected_scope = installed_index(installation).get(scope.value)
     for executable, stage, mode, options in cases:
         name = f"{executable}-{stage}"
         path = output / f"{name}.npz"
         run(command(commands[executable], original, path, scope, mode, events, options), output, name, 3,
             {"ATLAS_JET_LIBRARY_AUDIT": str(output / f"{name}-library-maps.json")})
-        digests[name] = branch_digest(output / f"{name}.log")
+        log = output / f"{name}.log"
+        digests[name] = branch_digest(log)
+        if verify_projection_identity:
+            projections[name] = projection_receipt(log, expected_scope if options else None)
     authority_full = output / "pip-canonical-full.npz"
     compare(authority_full, output / "pip-indexed-full.npz")
     compare(authority_full, output / "uv-indexed-full.npz")
@@ -111,6 +137,7 @@ def check(
         "original": str(original),
         "stock_full_histogram": {"path": str(authority), "sha256": digest(authority)},
         "branch_digests": digests,
+        "projection_identities": projections,
         "all_histogram_fields_exact": True,
         "matched_nominal_nosys_exact": True,
     })
@@ -126,6 +153,7 @@ def measure(
     output: Path,
     events: Annotated[int, typer.Option(min=0)] = 0,
     rounds: Annotated[int, typer.Option(min=4)] = 4,
+    verify_projection_identity: bool = False,
 ) -> None:
     """Measure fresh canonical, prebuilt and reconstructed document startup through one script."""
     require_cpu()
@@ -148,6 +176,9 @@ def measure(
     grouped = {variant: [] for variant in options}
     authority = None
     branches = None
+    projections = {}
+    if verify_projection_identity:
+        expected_scope = installed_index(installation)[scope.value]
     for iteration in range(rounds):
         offset = iteration % len(options)
         for variant in names[offset:] + names[:offset]:
@@ -156,7 +187,10 @@ def measure(
             histogram = work / "histograms.npz"
             result = run_leg(command(commands["pip"], original, histogram, scope, "full", events, options[variant]),
                              CLEAN_ENV, work, "startup", event_source=original)
-            selected = branch_digest(work / "startup.log")
+            log = work / "startup.log"
+            selected = branch_digest(log)
+            if verify_projection_identity:
+                projections[work.name] = projection_receipt(log, expected_scope if variant == "indexed" else None)
             if authority is None:
                 authority = histogram
                 branches = selected
@@ -170,6 +204,7 @@ def measure(
         "events": events,
         "rounds": rounds,
         "branch_digest": branches,
+        "projection_identities": projections,
         "all_histograms_exact": True,
         "prebuilt_payload": {"path": str(prebuilt), **manifest["artifacts"][relative]},
         "includes_private_temporary_file_construction": ["indexed"],
