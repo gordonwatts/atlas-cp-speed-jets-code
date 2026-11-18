@@ -274,7 +274,7 @@ def small_sf(nodes, buffers, p4, selection, truth, counts, state, diagnose):
 
 
 def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buffers,
-                   diagnose=False, through="final"):
+                   diagnose=False, through="final", prepare_large_truth=False):
     stages_only = through != "final"
     if mode == Mode.stored or through == "stored":
         for prefix in selected:
@@ -357,7 +357,7 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
         features = (small_jvt_inputs(source, collection, rows, prepared[1])
                     if prefix == "sr" and not stages_only else None)
         context = (truth_context(source, R10_TRUTH, buffers)
-                   if prefix == "lr" and ff_names and not stages_only else nullcontext())
+                   if prefix == "lr" and (ff_names or prepare_large_truth) and not stages_only else nullcontext())
         with context:
             for state in states[prefix]:
                 is_weight_only = prefix == "sr" and state in WEIGHT_DIRECTIONS
@@ -443,6 +443,9 @@ def main(
     repeat: Annotated[int, typer.Option("-n", "--repeat", min=1)] = 1,
     n: Annotated[int | None, typer.Option("-e", "--events", min=0)] = None,
     chunk: Annotated[int | None, typer.Option("--chunk", min=1)] = None,
+    matched_read: Annotated[bool, typer.Option(
+        "--matched-read", help="Read the full calibrated input and prepare common truth for nominal timing controls",
+    )] = False,
 ):
     """Histogram jets directly from the original PHYSLITE CollectionTree."""
     check_execution()
@@ -464,7 +467,8 @@ def main(
     provenance = provenance or (payload.with_name("provenance.json") if payload else None)
     ff_names = ff_states(provenance, "final", mode_name, states)
 
-    plan = branch_plan(selected, mode_name)
+    matched_nominal = matched_read and mode == Mode.nominal
+    plan = branch_plan(selected, Mode.full if matched_nominal else mode_name)
     first_pass = None
     first_objects = None
     file_uuid = None
@@ -490,7 +494,8 @@ def main(
                 arrays = tree.arrays(requested, entry_start=start, entry_stop=stop, how=dict, library="ak")
                 source = {label: arrays[name] for label, name in branches.items() if name is not None}
                 check_execution()
-                for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers):
+                for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers,
+                                            prepare_large_truth=matched_nominal):
                     if frame.state == "NOSYS":
                         objects[frame.prefix] += int(frame.counts.sum())
                     pt = frame.fields.get("hist_pt", frame.fields.get("p4pt"))
@@ -526,6 +531,8 @@ def main(
     with output.open("xb") as stream:
         np.savez(stream, **results)
     typer.echo(f"{original.name} ({file_uuid}), {len(requested)} input branches")
+    if matched_read and mode != Mode.stored:
+        typer.echo("Calibrated input plan: matched full-state reads and truth preparation")
     typer.echo(f"{events} unique events, {event_visits} event visits across {repeat} passes")
     for prefix, names in states.items():
         typer.echo(f"{prefix} {objects[prefix]} unique jets, {object_visits[prefix]} jet visits, "
