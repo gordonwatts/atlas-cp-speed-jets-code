@@ -1,13 +1,6 @@
-"""Export the nominal large-R JMS stage using the pinned AnalysisBase environment.
+"""Export the nominal large-R JMS stage in the pinned AnalysisBase environment."""
 
-Run from the campaign checkout after setting up AnalysisBase 25.2.117.
-
-    python -m exporters.large_jms --payload large-jms.json --provenance large-jms-sources.json
-"""
-
-import argparse
 import hashlib
-import json
 from pathlib import Path
 
 from exporters.rootdata import export_histogram
@@ -165,23 +158,3 @@ def export_large_jms(area=CALIB_AREA, config_name=CONFIG_NAME):
         "response_root_object": object_info,
     }
     return correction_def(configuration), provenance
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--payload", required=True, type=Path)
-    parser.add_argument("--provenance", required=True, type=Path)
-    args = parser.parse_args()
-    if args.payload.resolve() == args.provenance.resolve():
-        parser.error("payload and provenance require distinct paths")
-
-    correction, provenance = export_large_jms()
-    correction_set = {"schema_version": 3, "corrections": [correction]}
-    args.payload.write_text(json.dumps(correction_set, allow_nan=False, separators=(",", ":")) + "\n",
-                            encoding="utf-8")
-    args.provenance.write_text(json.dumps(provenance, indent=2, allow_nan=False, sort_keys=True) + "\n",
-                               encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()
