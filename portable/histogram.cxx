@@ -1,5 +1,7 @@
 #include "histogram.h"
 
+#include "../provider/packed_histogram.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -285,8 +287,21 @@ std::unique_ptr<Histogram> restore_histogram(const Json& data) {
     throw std::invalid_argument("expected a numeric histogram of dimension one to three");
   std::vector<Axis> axes;
   for (const auto& value : json_axes.GetArray()) axes.push_back(read_axis(value));
-  return std::make_unique<Histogram>(name.GetString(), std::move(axes),
-                                     number_array(field(data, "content")),
+  const auto& content = field(data, "content");
+  std::vector<double> cells;
+  if (content.IsObject()) {
+    const auto kind = std::string_view(name.GetString(), name.GetStringLength());
+    // The packed format is defined only for the one-dimensional TH1F.
+    if (axes.size() != 1) throw std::invalid_argument("packed histogram dimension mismatch");
+    const auto count = static_cast<std::size_t>(axes.front().GetNbins()) + 2;
+    histogram_encoding::decode_binary32(content, kind, count, [&](std::size_t i, std::uint32_t word) {
+      if (i == 0) cells.reserve(count);
+      cells.push_back(histogram_encoding::finite_binary32(word));
+    });
+  } else {
+    cells = number_array(content);
+  }
+  return std::make_unique<Histogram>(name.GetString(), std::move(axes), std::move(cells),
                                      number_array(field(data, "sumw2")));
 }
 

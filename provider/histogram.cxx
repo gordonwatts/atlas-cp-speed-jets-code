@@ -1,4 +1,5 @@
 #include "histogram.h"
+#include "packed_histogram.h"
 
 #include <TH2.h>
 #include <TH3.h>
@@ -93,9 +94,13 @@ std::unique_ptr<TH1> jets::restore_histogram(const rapidjson::Value& data) {
   }
   const auto& contents = field(data, "content");
   const auto& sumw2 = field(data, "sumw2");
-  if (!contents.IsArray() || contents.Size() != cells || !sumw2.IsArray() ||
-      (!sumw2.Empty() && sumw2.Size() != cells))
+  const bool packed = contents.IsObject();
+  if ((!packed && (!contents.IsArray() || contents.Size() != cells)) ||
+      !sumw2.IsArray() || (!sumw2.Empty() && sumw2.Size() != cells))
     throw std::invalid_argument("histogram global bin counts disagree");
+  const std::string_view storage_class(kind.GetString(), kind.GetStringLength());
+  if (packed && (storage_class != "TH1F" || axes.size() != 1))
+    throw std::invalid_argument("packed cells require a one-dimensional TH1F");
   std::unique_ptr<TH1> hist;
   switch (name[3]) {
     case 'C': hist = allocate<TH1C, TH2C, TH3C>(axes); break;
@@ -115,9 +120,16 @@ std::unique_ptr<TH1> jets::restore_histogram(const rapidjson::Value& data) {
     }
   }
   hist->Sumw2(!sumw2.Empty());
-  for (unsigned i = 0; i < cells; ++i) {
-    hist->SetBinContent(i, number(contents[i]));
+  const auto set_cell = [&](unsigned i, double content) {
+    hist->SetBinContent(i, content);
     if (!sumw2.Empty()) hist->GetSumw2()->SetAt(number(sumw2[i]), i);
+  };
+  if (packed) {
+    histogram_encoding::decode_binary32(contents, storage_class, cells, [&](std::size_t i, std::uint32_t word) {
+      set_cell(static_cast<unsigned>(i), histogram_encoding::finite_binary32(word));
+    });
+  } else {
+    for (unsigned i = 0; i < cells; ++i) set_cell(i, number(contents[i]));
   }
   return hist;
 }
