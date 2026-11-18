@@ -1,0 +1,11 @@
+{
+  "purpose": "Measure full original-file canonical, prebuilt and on-demand single-radius loading with one installed wheel.",
+  "overlay": "results/build/full-scoped-001/overlay",
+  "provider": "results/build/joint-baseline-001/libjets.so",
+  "payload": "results/export/eta-jes-packed-001/jets.json",
+  "sdk": "results/build/core-precision-002/venv/lib/python3.14/site-packages/correctionlib",
+  "bundle": "results/packaging/bundle-005",
+  "installation": "results/packaging/pristine-005",
+  "partition": "results/export/eta-jes-partition-001",
+  "output": "results/validation/packed-loading-001"
+}
