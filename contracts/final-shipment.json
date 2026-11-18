@@ -1,0 +1,36 @@
+{
+  "purpose": "Qualify the selected original-stream small-R, large-R and combined ATLAS jet workflows",
+  "overlay": "results/build/full-scoped-001/overlay",
+  "provider": "results/build/final-prefix-truth-index-001/libjets.so",
+  "payload": "results/export/eta-jes-packed-001/jets.json",
+  "sdk": "results/build/core-precision-002/venv/lib/python3.14/site-packages/correctionlib",
+  "bundle": "results/packaging/bundle-006",
+  "installation": "results/packaging/pristine-006",
+  "partition": "results/export/eta-jes-partition-001",
+  "output": "results/validation/shipment-final-001",
+  "profile_repeats": 10,
+  "unprofiled_overhead": true,
+  "selected_native_build_options": [
+    "rng-cache-large",
+    "fast-variable-flow",
+    "unsigned-sign-pairs",
+    "rng-prefix",
+    "large-jmr-match-cache",
+    "variable-axis-index"
+  ],
+  "selected_signed_workflows": [
+    "small",
+    "both"
+  ],
+  "selected_physical_chunks": {
+    "small": 1000,
+    "large": 4000,
+    "both": 1000
+  },
+  "selected_loading": {
+    "small": "indexed",
+    "large": "indexed",
+    "both": "canonical"
+  },
+  "selection_evidence": "results/diagnostics/stacked-native-pairs-001/plans/index.json"
+}
