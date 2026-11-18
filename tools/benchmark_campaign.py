@@ -294,7 +294,7 @@ def faithful_startup_probe(child: dict, family: list[dict], interpreter: Path) -
 
 def verify_columnar(job: Job, attempt: Path, receipt: dict, inventory: dict,
                     source: dict, cohort: Cohort, core: Path, provider: Path | None,
-                    wheel_members: dict) -> dict:
+                    wheel_members: dict, columnar_python: Path) -> dict:
     log = (attempt / "columnar.log").read_text()
     summary = f"{EVENTS} unique events, {EVENTS} event visits across 1 passes"
     if log.count(summary) != 1 or log.count(f"Pass 1/1, {EVENTS} events") != 1:
@@ -328,13 +328,21 @@ def verify_columnar(job: Job, attempt: Path, receipt: dict, inventory: dict,
             loaded.update(Path(path) for path in audited["libraries"])
         if any(path.is_relative_to("/cvmfs") or path.name.startswith(ROOT_LIBRARIES) for path in loaded):
             raise ValueError(f"Production wheel loaded a release/ROOT library in {attempt}")
+        site = (columnar_python.parent.parent / "lib/python3.14/site-packages").resolve(strict=True)
+        package = site / "correctionlib"
         for name, digest in wheel_members["native"].items():
-            matches = [path for path in loaded if path.name == name]
+            if name.startswith("_core."):
+                expected = package / name
+                matches = {path for path in loaded if path.parent.name == "correctionlib"
+                           and path.name.startswith("_core.") and path.name.endswith(".so")}
+            else:
+                expected = package / "lib" / name
+                family = name.split(".so", 1)[0] + ".so"
+                matches = {path for path in loaded if path.name == family or path.name.startswith(family + ".")}
             required = job.mode != "stored" or name in {"libstdc++.so.6", "libgcc_s.so.1"}
-            if len(matches) != int(required) or any(sha256(path) != digest for path in matches):
-                raise ValueError(f"Production wheel runtime differs for {name} in {attempt}")
-        compiler, = (path for path in loaded if path.name == "libstdc++.so.6")
-        data = compiler.parents[2] / "atlas_jet_demo/data"
+            if matches != ({expected} if required else set()) or (required and sha256(expected) != digest):
+                raise ValueError(f"Production wheel runtime differs for {name} in {attempt}: {sorted(matches)}")
+        data = site / "atlas_jet_demo/data"
         for name, digest in wheel_members["data"].items():
             if sha256(data / name) != digest:
                 raise ValueError(f"Installed production payload differs for {name} in {attempt}")
@@ -427,7 +435,7 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             leg = run_leg(command, environment, attempt, "columnar")
         counters = verify_columnar(
             job, attempt, leg, inventory, context.source, context.cohort,
-            context.core, context.c_provider, context.wheel_members,
+            context.core, context.c_provider, context.wheel_members, context.columnar_python,
         )
         counters["matched_read"] = use_matched_read
         if context.cohort == Cohort.production:
