@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "packaging"))
 from compare_shipment_progression import (
     BASE_ENV, CPU, EVENTS, REFERENCE, SCOPES, execute, installed, require_cpu, schedule, stock_endpoint, summarize,
 )
+from compare_scoped_demo import Scope
 from profile_native import digest, write_json
 
 INSTALLATION = ROOT / "results/packaging/pristine-006"
@@ -161,9 +162,10 @@ def check_fixtures(arms, output):
     write_json(output / "fixture-summary.json", results)
 
 
-def main(output: Path, eligibility: bool = True, repeat: bool = False):
+def main(output: Path, eligibility: bool = True, repeat: bool = False, scope: Scope | None = None):
     """Run one optional pair diagnostic or a separate bounded repeat against exact 006."""
     require_cpu()
+    selected = SCOPES if scope is None else (scope.value,)
     output = output.resolve()
     output.mkdir()
     source = json.loads((ROOT / "config/jets-input.json").read_text())
@@ -175,15 +177,15 @@ def main(output: Path, eligibility: bool = True, repeat: bool = False):
     objects = {key: value["objects"] for key, value in observed["collections"].items()}
     authorities = {
         scope: stock_endpoint(REFERENCE / f"full-file-pilot-{('combined' if scope == 'both' else scope)}-002",
-                              scope, original, source, digest) for scope in SCOPES
+                              scope, original, source, digest) for scope in selected
     }
     arm = installed(INSTALLATION, BUNDLE, output / "installed-elf")
     arms = shadows(arm, output)
-    jobs = list(schedule(tuple(arms)))
+    jobs = [job for job in schedule(tuple(arms)) if job[1] in selected]
     write_json(output / "provenance.json", {
         "base": arm["provenance"], "original": source, "authority": authorities,
         "controller": metadata(Path(__file__)), "fixture": metadata(FIXTURE),
-        "schedule": jobs, "status": "separate bounded repeat" if repeat else "initial engineering screen",
+        "scopes": selected, "schedule": jobs, "status": "separate bounded repeat" if repeat else "initial engineering screen",
         "candidate_policy": "Borrow only plain owned contiguous 1D arrays in the exact opted-in, single-worker CLI. "
                             "The native provider reads synchronously and has no Python callbacks. General API uses flatten.",
         "shadow_paths": {name: {"package": str(arm["shadow"]), "environment": arm["env"],
@@ -195,7 +197,7 @@ def main(output: Path, eligibility: bool = True, repeat: bool = False):
         if eligibility:
             coverage = output / "eligibility"
             coverage.mkdir()
-            scope = "both"
+            scope = "both" if "both" in selected else selected[0]
             counts_path = coverage / "arrays.json"
             measured = {**arms["borrow"], "env": {**arms["borrow"]["env"],
                         "ATLAS_JET_CONTIGUOUS_COUNTS": str(counts_path)}}
@@ -207,7 +209,7 @@ def main(output: Path, eligibility: bool = True, repeat: bool = False):
             write_json(coverage / "summary.json", {"scope": scope, "arrays": counts,
                        "fallback_fraction": counts["fallback_arrays"] / total,
                        "timing_classification": "instrumented eligibility only"})
-        evidence = {scope: {name: [] for name in arms} for scope in SCOPES}
+        evidence = {scope: {name: [] for name in arms} for scope in selected}
         branches = {}
         for round_no, scope, name in jobs:
             work = output / f"{round_no:02d}-{scope}-{name}"
@@ -226,7 +228,8 @@ def main(output: Path, eligibility: bool = True, repeat: bool = False):
         result["control_over_borrow"] = control["mean_s"] / treatment["mean_s"]
         result["qualified_for_spread"] = control["pass"] and treatment["pass"]
         result.pop("speedup_ratios")
-    write_json(output / "summary.json", {"all_histograms_exact": True, "matched_physical_branches": branches,
+    write_json(output / "summary.json", {"scopes": selected, "all_histograms_exact": True,
+                                        "matched_physical_branches": branches,
                                         "results": results, "all_series_within_spread":
                                         all(row["qualified_for_spread"] for row in results.values())})
 
