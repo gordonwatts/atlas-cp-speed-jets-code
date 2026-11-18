@@ -20,7 +20,7 @@ case "$jets_framework_choice" in
       echo "Input reuse requires the full framework profile" >&2
       exit 2
     fi
-    jets_framework_cmake_options+=(-DCMAKE_CXX_FLAGS=-DJETS_FRAMEWORK_REUSE_INPUTS)
+    jets_framework_cmake_options+=(-DJETS_FRAMEWORK_REUSE_INPUTS=ON)
     ;;
   *) echo "Unknown framework build choice $jets_framework_choice" >&2; exit 2 ;;
 esac
