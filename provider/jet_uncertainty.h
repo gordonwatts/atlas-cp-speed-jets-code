@@ -1,10 +1,12 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 
 namespace correction {
+class PluginConfig;
 class PluginRegistry;
 }
 
@@ -28,6 +30,18 @@ struct JetUncertaintyResult {
   std::array<double, 4> p4;
   std::optional<JetUncertaintyStatus> status;
   std::optional<bool> is_bjet;
+};
+
+class JetUncertaintyModel {
+ public:
+  explicit JetUncertaintyModel(const correction::PluginConfig& configuration);
+  ~JetUncertaintyModel();
+
+  JetUncertaintyResult evaluate(const JetUncertaintyInput& input, const std::string& systematic) const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> model_;
 };
 
 }  // namespace jets
