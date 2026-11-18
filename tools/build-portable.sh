@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -eo pipefail
+
+if [[ -z ${JETS_PORTABLE_BUILD_SNAPSHOT:-} ]]; then
+  export JETS_PORTABLE_BUILD_SNAPSHOT=1
+  exec bash -c "$(cat -- "$0")" "$0" "$@"
+fi
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 label=${1:?pass a new build name}
 core=${2:-core-precision-002}
@@ -45,6 +51,8 @@ printf '%s\n' "${jets_candidate_choices[@]:-baseline}" > build-choices.txt
 printf '%s\n' "-DJETS_PORTABLE" "${jets_candidate_defines[@]}" > build-defines.txt
 printf '%s\n' "${cxx_flags[@]}" > compile-flags.txt
 git -C "$root" rev-parse HEAD > source-revision.txt
+printf '%s\n' "$BASH_EXECUTION_STRING" > launched-script.sh
+sha256sum launched-script.sh > launched-script.sha256
 source_files=()
 for src in "${sources[@]}"; do source_files+=("$root/$src.cxx"); done
 sha256sum "$root/tools/build-portable.sh" "${source_files[@]}" \

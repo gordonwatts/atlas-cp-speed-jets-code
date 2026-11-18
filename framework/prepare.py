@@ -99,7 +99,7 @@ def link_bridge(source):
     return source.replace(token, token[:-1] + " JetsCorrectionRuntime )", 1)
 
 
-def prepare(release, destination, framework, profile):
+def prepare(release, destination, framework, profile, choice="baseline"):
     work_src = destination / "src"
     work_src.mkdir()
     source_receipts = {}
@@ -116,6 +116,9 @@ def prepare(release, destination, framework, profile):
     if profile == "full":
         from prepare_full import FULL_PACKAGES
         packages.extend(FULL_PACKAGES)
+    if choice == "reuse-inputs":
+        packages = [package for package in packages if Path(package).name in
+                    {"JetMomentTools", "JetJvtEfficiency", "JetUncertainties"}]
     for package in packages:
         shutil.copytree(release / "src" / package, work_src / package)
     overlay_pkg = work_src / PACKAGE_NAME
@@ -123,8 +126,9 @@ def prepare(release, destination, framework, profile):
     shutil.copytree(framework / "runtime", runtime)
     shutil.copyfile(framework.parent / "provider/event_inputs.h",
                     runtime / "JetsCorrectionRuntime/EventInputsProvider.h")
-    for file in (framework / "nominal").iterdir():
-        shutil.copyfile(file, overlay_pkg / "Root" / file.name)
+    if PACKAGE_NAME in packages:
+        for file in (framework / "nominal").iterdir():
+            shutil.copyfile(file, overlay_pkg / "Root" / file.name)
 
     nominal_overrides = {
         **{name: lambda text, sig=sig, call=call: replace_method(text, sig, call)
@@ -146,6 +150,8 @@ def prepare(release, destination, framework, profile):
                 overrides[relative] = full_patch
     diffs = []
     for relative, patch in overrides.items():
+        if not any(relative.startswith(package + "/") for package in packages):
+            continue
         path = work_src / relative
         original = path.read_bytes()
         upstream = download(relative)
@@ -162,10 +168,11 @@ def prepare(release, destination, framework, profile):
 
     (destination / "overlay.diff").write_text("".join(diffs))
     (destination / "source-provenance.json").write_text(
-        json.dumps({"athena_commit": COMMIT, "analysisbase": str(release), "files": source_receipts}, indent=2) + "\n"
+        json.dumps({"athena_commit": COMMIT, "analysisbase": str(release), "profile": profile, "build_choice": choice,
+                    "rebuilt_packages": packages, "files": source_receipts}, indent=2) + "\n"
     )
 
 
 if __name__ == "__main__":
     release, destination, framework = map(Path, sys.argv[1:4])
-    prepare(release, destination, framework, sys.argv[4])
+    prepare(release, destination, framework, *sys.argv[4:])
