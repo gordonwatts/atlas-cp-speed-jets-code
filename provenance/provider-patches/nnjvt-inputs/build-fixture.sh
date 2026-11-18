@@ -8,7 +8,7 @@ payload=$(realpath -e "${2:?Provide the approved canonical jets.json}")
 sdk=$(realpath -e "${3:-"$root/results/build/core-precision-002/venv/lib/python3.14/site-packages/correctionlib"}")
 lwtnn_build=$(realpath -e "${4:-"$root/results/build/portable-lwtnn-001"}")
 lwtnn="$lwtnn_build/build/lib/liblwtnn-stat.a"
-python=$(realpath -s "$sdk/../../../../bin/python")
+fixture_python="$root/.reference-venv/bin/python"
 
 mkdir "$output"
 exec > "$output/build.log" 2>&1
@@ -20,7 +20,7 @@ core="$sdk/lib/libcorrectionlib.so"
 rapid="$root/source/correctionlib/rapidjson/include"
 g++ --version
 test -s "$lwtnn"
-test -x "$python"
+test -x "$fixture_python"
 
 revision=$(cat "$variant/base-revision.txt")
 for arm in baseline candidate; do
@@ -47,7 +47,7 @@ done
 g++ -std=c++20 -O2 -g -ffp-contract=off -frounding-math -Wall -Wextra -Werror -pthread \
   -I"$sdk/include" -I"$rapid" "$variant/fixture.cxx" -L"$sdk/lib" -lcorrectionlib -ldl \
   -Wl,-rpath,"$sdk/lib" -o "$output/nnjvt-inputs-fixture"
-PYTHONDONTWRITEBYTECODE=1 "$python" "$variant/prepare-payload.py" "$payload" "$output"
+env -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH PYTHONDONTWRITEBYTECODE=1 "$fixture_python" "$variant/prepare-payload.py" "$payload" "$output"
 export LD_LIBRARY_PATH="$sdk/lib:$externals/lib:$LD_LIBRARY_PATH"
 printf '%s\n' "$LD_LIBRARY_PATH" > "$output/library-path.txt"
 for binary in "$output"/{baseline.so,candidate.so,nnjvt-inputs-fixture}; do
