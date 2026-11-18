@@ -177,7 +177,7 @@ import typer
 
 from check_demo import CLEAN_ENV, digest, run
 from compare_scoped_demo import (
-    Scope, branch_digest, command, compare, installed_commands, installed_index,
+    Scope, branch_digest, check_quality, command, compare, installed_commands, installed_index,
     projection_receipt, require_cpu, run_leg,
 )
 
@@ -249,6 +249,7 @@ def screen(
     reference: Path,
     output: Path,
     scope: Annotated[Scope | None, typer.Option(help="Screen one scope. By default, screen small, large and both.")] = None,
+    candidate: Annotated[int | None, typer.Option(help="Repeat a rotated pair of this screened size and 1000.")] = None,
 ):
     """Screen physical chunk sizes on the original full file through the uninstrumented installed command."""
     require_cpu()
@@ -256,17 +257,26 @@ def screen(
     installation, reference, output = (path.resolve() for path in (installation, reference, output))
     commands, installed = installed_commands(installation)
     scopes = [scope] if scope else list(Scope)
+    if candidate is not None and candidate not in (256, 4000):
+        raise typer.BadParameter("The bounded repeat must use one of the screened alternatives, 256 or 4000")
     defaults = installed.get("demo_defaults")
     output.mkdir()
     index = installed_index(installation) if defaults and defaults["compact_payload_default_scopes"] else {}
     measurements = {}
+    quality = {}
     for chosen in scopes:
         number = list(Scope).index(chosen)
         reference_scope = "combined" if chosen == Scope.both else chosen.value
         expected = reference / f"full-file-pilot-{reference_scope}-002/01-full/histograms.npz"
         row = measurements[chosen.value] = {}
-        for chunk in CHUNKS[number:] + CHUNKS[:number]:
-            case = output / f"{chosen.value}-{chunk}"
+        if candidate is None:
+            plan = [(0, size) for size in CHUNKS[number:] + CHUNKS[:number]]
+        else:
+            plan = [(r, size) for r in range(4)
+                    for size in ((1000, candidate) if (r + number) % 2 == 0 else (candidate, 1000))]
+        for r, chunk in plan:
+            label = str(chunk) if candidate is None else f"{r:02}-{chunk}"
+            case = output / f"{chosen.value}-{label}"
             case.mkdir()
             histograms = case / "histograms.npz"
             process = run_leg(
@@ -283,7 +293,8 @@ def screen(
                 raise ValueError(f"Physical branch plan changed for {chosen.value}")
             requested_default = defaults and chosen.value in defaults["compact_payload_default_scopes"]
             observed = projection_receipt(log, index[chosen.value] if requested_default else None) if defaults else {}
-            row[str(chunk)] = {
+            row[label] = {
+                "round": r, "chunk_events": chunk,
                 "wall_s": process["wall_s"], "cpu_s": process["cpu_user_s"] + process["cpu_sys_s"],
                 "peak_rss_kB": process["peak_rss_kb"], "branch_sha256": branch_hash,
                 "projection": observed, "exact_stock_histograms": True,
@@ -291,8 +302,15 @@ def screen(
                 "stock_reference": {"path": str(expected), "sha256": digest(expected)},
                 "job_receipt": str(case / "installed.json"),
             }
+        if candidate is not None:
+            quality[chosen.value] = {
+                str(size): check_quality([entry for entry in row.values() if entry["chunk_events"] == size])
+                for size in (1000, candidate)
+            }
     _report(output / "summary.json", {
-        "classification": "Single-pass chunk-size engineering screen; review guest receipts before interpreting times.",
+        "classification": ("Single-pass chunk-size engineering screen" if candidate is None else
+                           "Fresh original-file four-round chunk-size pairs, first observation excluded"),
+        "quality": quality,
         "installation": installed, "original": str(original), "original_uuid": dataset["tfile_uuid"],
         "events": FULL_EVENTS, "matched_read": True, "measurements": measurements,
     })
