@@ -108,6 +108,8 @@ def main(
         payload = packaged_payload if scope == "both" or scope not in compact else (
             paths["partition"] / "scopes" / scope / "jets.json")
         options = ["--reuse-nominal-nnjvt-update"] if defaults["reuse_nominal_nnjvt_update"] else []
+        if scope in defaults.get("reuse_uncertainty_sign_pair_scopes", []):
+            options.append("--reuse-uncertainty-sign-pairs")
         run("bash", "tools/validate_direct_release.sh", python, packaged_provider,
             payload, output / f"C-{scope}", scope, *options)
     elif stage == "shipped":

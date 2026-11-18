@@ -40,7 +40,10 @@ def order_worker(visible, original, authority, output, events):
     installed = json.loads((demo.DATA / "build.json").read_text())
     states = demo.select_states(mode, json.loads((demo.DATA / "jet-states.json").read_text()), selected)
     ff_names = demo.ff_states(provenance, "final", mode, states)
-    reuse = installed.get("demo_defaults", {}).get("reuse_nominal_nnjvt_update", False)
+    defaults = installed.get("demo_defaults", {})
+    options = {"reuse_nominal_nnjvt_update": defaults.get("reuse_nominal_nnjvt_update", False)}
+    if "both" in defaults.get("reuse_uncertainty_sign_pair_scopes", []):
+        options["reuse_uncertainty_sign_pairs"] = True
     known = {key: stage for key, stage in reference_branches(selected, states, ff_names, "final", mode).items()
              if stage == "final"}
     required = set(known) | set(EVENT_KEYS)
@@ -108,7 +111,7 @@ def order_worker(visible, original, authority, output, events):
         for field in EVENT_KEYS:
             save_field(field, stock_order[field], ordered_identity[field])
         for frame in demo.evaluate_chunk(values, events, selected, mode, states, ff_names, nodes, buffers,
-                                         diagnose=True, through="final", reuse_nominal_nnjvt_update=reuse):
+                                         diagnose=True, through="final", **options):
             if frame.stage != "final":
                 continue
             for field, actual in frame.fields.items():

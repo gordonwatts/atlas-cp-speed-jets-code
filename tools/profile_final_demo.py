@@ -398,12 +398,16 @@ def validate_run(directory, scope, events, source_uuid, bundle, packaged):
     reuse = bool(defaults["reuse_nominal_nnjvt_update"] and
                  scope in defaults["reuse_nominal_nnjvt_update_scopes"] and
                  defaults["mode"] in defaults["reuse_nominal_nnjvt_update_modes"])
+    sign_pairs = scope in defaults.get("reuse_uncertainty_sign_pair_scopes", [])
+    sign_marker = "Trial enabled: reuse unsigned uncertainty aggregate within adjacent state pairs"
+    if log.count(sign_marker) != int(sign_pairs):
+        raise ValueError(f"Signed-state usage differs from the sealed default for {scope}")
     reuse_marker = "Trial enabled: reuse nominal NNJvt update for bitwise-identical input rows"
     if log.count(reuse_marker) != int(reuse):
         raise ValueError(f"The packaged NNJvt reuse default did not execute as sealed for {scope}")
     return {
         "objects": objects, "branch_sha256": branch, "compact_payload": actual_payload,
-        "nnjvt_reuse": reuse, "runtime_maps": verify_loaded(directory, packaged),
+        "nnjvt_reuse": reuse, "unsigned_pair_reuse": sign_pairs, "runtime_maps": verify_loaded(directory, packaged),
     }
 
 

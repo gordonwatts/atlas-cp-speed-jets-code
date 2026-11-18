@@ -11,7 +11,7 @@ scope=${5:?small, large, or both}
 shift 5
 case "$scope" in small|large|both) ;; *) exit 2;; esac
 for choice in "$@"; do
-  case "$choice" in --reuse-nominal-nnjvt-update) ;; *) exit 2;; esac
+  case "$choice" in --reuse-nominal-nnjvt-update|--reuse-uncertainty-sign-pairs) ;; *) exit 2;; esac
 done
 [[ $(awk '/^Cpus_allowed_list:/ {print $2}' /proc/$$/status) == 3 ]]
 mkdir "$out"

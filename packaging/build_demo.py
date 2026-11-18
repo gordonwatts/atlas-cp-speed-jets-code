@@ -119,6 +119,17 @@ def use_nnjvt_default(source: str, enabled: bool) -> str:
     )
 
 
+def set_sign_pair_scopes(source: str, scopes: tuple[str, ...]) -> str:
+    start = source.index("    reuse_uncertainty_sign_pairs: Annotated[bool, typer.Option(")
+    stop = source.index("    )] = False,\n", start) + len("    )] = False,\n")
+    source = source[:start] + source[stop:]
+    return replace_once(
+        source, "    mode_name = mode.value\n",
+        f"    reuse_uncertainty_sign_pairs = mode == Mode.full and scope.value in {scopes!r}\n"
+        "    mode_name = mode.value\n",
+    )
+
+
 def build_visible_script(
     wheel: Path,
     version: str,
@@ -127,6 +138,8 @@ def build_visible_script(
     *,
     compact_defaults: tuple[str, ...] = (),
     reuse_nnjvt_default: bool = False,
+    sign_pair_scopes: tuple[str, ...] = (),
+    chunk_events: int | None = None,
     columnar_source: bytes | None = None,
 ) -> None:
     if not compact and compact_defaults:
@@ -183,6 +196,10 @@ def build_visible_script(
     if compact:
         source = use_compact_payload(source, compact_defaults)
     source = use_nnjvt_default(source, reuse_nnjvt_default)
+    source = set_sign_pair_scopes(source, sign_pair_scopes)
+    if chunk_events is not None:
+        chunk_opt = '    chunk: Annotated[int | None, typer.Option("--chunk", min=1)] = '
+        source = replace_once(source, chunk_opt + "None,", chunk_opt + f"{chunk_events},")
     compile(source, output.as_posix(), "exec")
     output.write_text(source)
 
@@ -309,6 +326,8 @@ def build(
     compact_default: Annotated[CompactDefault, typer.Option(
         help="Default compact loading by single-collection scope. Both enables small and large separately.",
     )] = CompactDefault.off,
+    sign_default_scope: Annotated[list[str] | None, typer.Option(help="Full workflows using signed component reuse")] = None,
+    chunk_events: Annotated[int | None, typer.Option(min=1, help="Qualified physical chunk size override")] = None,
     reuse_nominal_nnjvt_default: Annotated[bool, typer.Option(
         help="Default to exact-input NNJvt reuse for small-R full systematics.",
     )] = False,
@@ -319,6 +338,12 @@ def build(
     output = output.resolve()
     provider = provider.resolve(strict=True)
     payload = payload.resolve(strict=True)
+    requested_scopes = sign_default_scope or []
+    sign_scopes = tuple(scope for scope in ("small", "large", "both") if scope in requested_scopes)
+    if len(sign_scopes) != len(requested_scopes):
+        raise ValueError("Unknown or duplicate signed-pair scope")
+    if sign_scopes and "unsigned-sign-pairs" not in (provider.parent / "build-choices.txt").read_text().splitlines():
+        raise ValueError("The requested signed-state scopes need a provider built with unsigned-sign-pairs")
     compact_scopes = COMPACT_DEFAULT_SCOPES[compact_default]
     if scope_index is None and compact_scopes:
         raise ValueError("--compact-default requires --scope-index")
@@ -389,6 +414,8 @@ def build(
                 "mode": "full",
                 "scope": "both",
                 "compact_payload_default_scopes": list(compact_scopes),
+                "reuse_uncertainty_sign_pair_scopes": list(sign_scopes),
+                "chunk_events": chunk_events or json.loads((CHECKOUT / "config/jet-histogram.json").read_text())["chunk_events"],
                 "reuse_nominal_nnjvt_update": reuse_nominal_nnjvt_default,
                 "reuse_nominal_nnjvt_update_modes": ["full"],
                 "reuse_nominal_nnjvt_update_scopes": ["small", "both"],
@@ -405,7 +432,8 @@ def build(
         script = output / "jets_demo.py"
         build_visible_script(
             wheel, version, script, compact=scope_index is not None, compact_defaults=compact_scopes,
-            reuse_nnjvt_default=reuse_nominal_nnjvt_default, columnar_source=columnar_source,
+            reuse_nnjvt_default=reuse_nominal_nnjvt_default, sign_pair_scopes=sign_scopes,
+            chunk_events=chunk_events, columnar_source=columnar_source,
         )
         build_identity["visible_source"] = identify(script)
         (data / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
