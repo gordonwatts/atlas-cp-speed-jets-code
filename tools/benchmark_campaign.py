@@ -60,6 +60,11 @@ class Cohort(str, Enum):
     production = "production"
 
 
+class RecheckPair(str, Enum):
+    AB = "AB"
+    AC = "AC"
+
+
 @dataclass(frozen=True)
 class Job:
     round: int
@@ -71,7 +76,7 @@ class Job:
     @property
     def key(self) -> str:
         if self.anchor:
-            return f"anchor-{self.round:02d}-combined-full-A"
+            return f"anchor-{self.round:02d}-{self.scope.value}-{self.mode}-A"
         return f"{self.round:02d}-{self.scope.value}-{self.mode}-{self.arm}"
 
     def details(self) -> dict:
@@ -587,6 +592,200 @@ def campaign_summary(jobs: dict[Job, tuple]) -> dict:
     return summary
 
 
+def recheck_schedule(scope: Scope, mode: str, pair: RecheckPair) -> list[Job]:
+    jobs = [Job(0, scope, mode, "A", anchor=True)]
+    for round_index in range(REPETITIONS):
+        arms = pair.value if round_index % 2 == 0 else pair.value[::-1]
+        jobs.extend(Job(round_index, scope, mode, arm) for arm in arms)
+    jobs.append(Job(REPETITIONS, scope, mode, "A", anchor=True))
+    return jobs
+
+
+def recheck_measurement(pair: RecheckPair, mode: str, rows: dict[str, list[dict]], drift: dict) -> dict:
+    ends = {"A": ("framework",), "B": ("framework",)} if pair == RecheckPair.AB else {
+        "A": ("framework", "histogram", "total"), "C": ("total",),
+    }
+    measurements = {
+        arm: {leg: check_quality([{"wall_s": row[leg]} for row in rows[arm]]) for leg in legs}
+        for arm, legs in ends.items()
+    }
+    if pair == RecheckPair.AB:
+        numerator, denominator, leg = "B", "A", "framework"
+        limit, lower_pass = BUDGET, True
+        name = "B_over_A_framework"
+    else:
+        numerator, denominator, leg = "A", "C", "total"
+        limit, lower_pass = (10.0 if mode == "full" else None), False
+        name = "A_over_C_end_to_end"
+    left = measurements[numerator][leg]
+    right = measurements[denominator][leg]
+    ratio = left["mean_s"] / right["mean_s"]
+    paired = [a / b for a, b in zip(left["retained"], right["retained"], strict=True)]
+    quality = (all(value["pass"] for legs in measurements.values() for value in legs.values())
+               and all(drift[leg]["pass"] for leg in ends["A"]))
+    threshold_pass = None
+    straddles = False
+    if limit is not None:
+        def passes(value):
+            return value <= limit if lower_pass else value >= limit
+
+        straddles = len({passes(value) for value in paired}) > 1
+        if quality and not straddles:
+            threshold_pass = passes(ratio)
+    return {
+        "name": name, "ratio_of_retained_means": ratio, "same_round_ratios": paired,
+        "threshold": limit, "threshold_kind": "framework budget" if lower_pass else (
+            "full-systematics aspiration" if limit is not None else None
+        ),
+        "threshold_pass": threshold_pass, "retained_pairs_straddle": straddles,
+        "quality_pass": quality, "ratio_qualified": quality and not straddles,
+        "quality": measurements,
+    }
+
+
+def paired_anchor_drift(anchors: list[dict], stock_rows: list[dict]) -> dict:
+    # Compare both narrow stock brackets against the median stock observation
+    # from the three retained pairs for this same scope and mode.
+    result = {}
+    for leg in anchors[0]:
+        values = [row[leg] for row in anchors]
+        median = statistics.median(row[leg] for row in stock_rows[1:])
+        deviation = max(abs(value - median) for value in values) / median
+        result[leg] = {"wall_s": values, "retained_stock_median_s": median,
+                       "max_median_deviation": deviation, "pass": deviation <= MAX_DEVIATION_FROM_MEDIAN}
+    return result
+
+
+def recheck_summary(jobs: dict[Job, tuple], scheduled: list[Job], pair: RecheckPair) -> dict:
+    summary = {
+        "completed": len(jobs), "planned": len(scheduled),
+        "progress": {job.key: str(attempt) for job, (attempt, _) in jobs.items()},
+    }
+    if len(jobs) != len(scheduled):
+        return summary
+    rows = {arm: [jobs[job][1]["wall_s"] for job in scheduled if not job.anchor and job.arm == arm]
+            for arm in pair.value}
+    anchors = [jobs[job][1]["wall_s"] for job in scheduled if job.anchor]
+    drift = paired_anchor_drift(anchors, rows["A"])
+    measured = recheck_measurement(pair, scheduled[0].mode, rows, drift)
+    return {**summary, "stock_anchor_drift": drift, "comparison": measured,
+            "quality_pass": measured["quality_pass"], "ratio_qualified": measured["ratio_qualified"]}
+
+
+def compatible_journal(original: dict, provenance: dict, controller_sources: tuple[Path, ...]) -> bool:
+    original = {**original, "identity_sha256": dict(original["identity_sha256"])}
+    # Prior journals stored controller code among the physics input identities.
+    # Their per-invocation receipts separately account for controller changes.
+    for path in controller_sources:
+        original["identity_sha256"].pop(str(path), None)
+    return original == provenance
+
+
+def original_recheck_authority(origin: Path, provenance: dict, controller_sources: tuple[Path, ...],
+                               pair: RecheckPair, scope: Scope, mode: str) -> dict:
+    campaign = origin / "campaign.json"
+    summary = origin / "summary.json"
+    initial = json.loads(campaign.read_text())
+    if not compatible_journal(initial, provenance, controller_sources):
+        raise ValueError("The requested artifacts and workload differ from the original production cohort")
+    saved = json.loads(summary.read_text())
+    if saved["completed"] != len(schedule()) or saved["planned"] != len(schedule()) or "ratios" not in saved:
+        raise ValueError("A paired recheck requires the completed original production journal")
+
+    historical = [Job(round_index, scope, mode, arm)
+                  for round_index in range(REPETITIONS) for arm in pair.value]
+    extra = {}
+    if scope != Scope.combined:
+        extra["combined_stock"] = Job(0, Scope.combined, mode, "A")
+    if mode == "nominal":
+        extra["full_stock"] = Job(0, scope, "full", "A")
+        if pair == RecheckPair.AC and provenance["columnar_matched_read"]:
+            extra["full_columnar"] = Job(0, scope, "full", "C")
+    receipts = {}
+    files = {}
+    for job in (*historical, *extra.values()):
+        accepted = selected_attempt(origin / job.key)
+        if accepted is None:
+            raise ValueError(f"Missing original accepted output for {job.key}")
+        attempt, receipt = accepted
+        if receipt["job"] != job.details() or str(attempt) != saved["progress"][job.key]:
+            raise ValueError(f"Original receipt or journal pointer changed for {job.key}")
+        if receipt["classification"] != ("warmup" if job.round == 0 else "retained"):
+            raise ValueError(f"Original attempt classification differs for {job.key}")
+        receipts[job] = receipt
+        files[job] = {key: {"path": str(attempt / name), **identity(attempt / name)}
+                      for key, name in (("histogram", "histograms.npz"), ("receipt", "receipt.json"))}
+
+    stock = historical[0]
+    def histogram(job):
+        return Path(files[job]["histogram"]["path"])
+
+    for job in historical[1:]:
+        exact_archive(histogram(job), histogram(stock))
+    if "combined_stock" in extra:
+        exact_archive(histogram(stock), histogram(extra["combined_stock"]), projection=True)
+    if "full_stock" in extra:
+        check_pair(histogram(stock), histogram(extra["full_stock"]))
+
+    rows = {arm: [receipts[job]["wall_s"] for job in historical if job.arm == arm] for arm in pair.value}
+    prior = recheck_measurement(pair, mode, rows, saved["stock_anchor_drift"])
+    if prior["ratio_qualified"]:
+        raise ValueError("Original ratio passed the applicable spread gates and does not straddle its threshold")
+    reason = []
+    if not prior["quality_pass"]:
+        reason.append("relevant original endpoint spread or stock drift did not qualify")
+    if prior["retained_pairs_straddle"]:
+        reason.append("original same-round pairs straddle the threshold")
+    guards = {"stock": files[stock], "candidate": files[historical[1]],
+              **{name: files[job] for name, job in extra.items()}}
+    if pair == RecheckPair.AC:
+        fields = ("matched_read", "input_branches", "input_branch_sha256")
+        reported = receipts[historical[1]]["input_visit_counters"]
+        guards["columnar_read"] = {key: reported[key] for key in fields}
+        if "full_columnar" in extra:
+            exact_archive(histogram(extra["full_columnar"]), histogram(extra["full_stock"]))
+            full_reported = receipts[extra["full_columnar"]]["input_visit_counters"]
+            if any(reported[key] != full_reported[key] for key in fields):
+                raise ValueError("Original matched nominal/full C physical reads differ")
+    return {
+        "pair": pair.value, "scope": scope.value, "mode": mode, "reason": reason,
+        "origin_campaign": {"path": str(campaign), **identity(campaign)},
+        "origin_summary": {"path": str(summary), **identity(summary)},
+        "original_ratio": prior, "guards": guards,
+        "original_attempts": {job.key: files[job] for job in files},
+    }
+
+
+def check_recheck_job(job: Job, attempt: Path, receipt: dict, recheck: dict) -> None:
+    output = attempt / "histograms.npz"
+    guards = recheck["guards"]
+
+    def checked_path(recorded, label):
+        path = Path(recorded["path"])
+        if identity(path) != {key: recorded[key] for key in ("sha256", "bytes")}:
+            raise ValueError(f"Previously verified {label} changed: {path}")
+        return path
+
+    def checked_histogram(name):
+        evidence = guards[name]
+        checked_path(evidence["receipt"], f"{name} receipt")
+        return checked_path(evidence["histogram"], f"{name} histogram")
+
+    for label in ("origin_campaign", "origin_summary"):
+        checked_path(recheck[label], label)
+    exact_archive(output, checked_histogram("stock"))
+    if job.arm != "A":
+        exact_archive(output, checked_histogram("candidate"))
+    if "combined_stock" in guards:
+        exact_archive(output, checked_histogram("combined_stock"), projection=True)
+    if "full_stock" in guards:
+        check_pair(output, checked_histogram("full_stock"))
+    if job.arm == "C":
+        current = receipt["input_visit_counters"]
+        if any(current[key] != value for key, value in guards["columnar_read"].items()):
+            raise ValueError(f"Paired C physical input reads differ for {job.key}")
+
+
 def installed_wheel(wheel: Path | None, cohort: Cohort) -> dict:
     if cohort == Cohort.faithful:
         if wheel is not None:
@@ -1098,6 +1297,10 @@ def run(
     payload_partition: Annotated[Path | None, typer.Option(help="Verified canonical partition and byte index")] = None,
     scoped_acceptance: Annotated[Path | None, typer.Option(help="JSON with b_recovery, c_objects and c_shipped per scope")] = None,
     diagnostic: Annotated[bool, typer.Option(help="Record visits without including them in timed cohorts")] = False,
+    recheck_of: Annotated[Path | None, typer.Option(help="Completed production journal for a fresh paired recheck")] = None,
+    recheck_scope: Annotated[Scope | None, typer.Option()] = None,
+    recheck_mode: Annotated[str | None, typer.Option(help="One mode from the original journal")] = None,
+    recheck_pair: Annotated[RecheckPair | None, typer.Option(help="AB framework budget or AC saved histogram")] = None,
 ) -> None:
     """Run or resume one exact full-file cohort on the reserved CPU."""
     if os.sched_getaffinity(0) != {CPU} or len(list(Path("/proc/self/task").iterdir())) != 1:
@@ -1106,6 +1309,17 @@ def run(
         raise typer.BadParameter("Set a job limit for a diagnostic invocation")
 
     result = result.resolve()
+    requested_recheck = (recheck_of, recheck_scope, recheck_mode, recheck_pair)
+    if any(requested_recheck) and not all(requested_recheck):
+        raise typer.BadParameter("Provide --recheck-of, --recheck-scope, --recheck-mode and --recheck-pair together")
+    if recheck_of:
+        if cohort != Cohort.production or diagnostic or jobs is not None:
+            raise typer.BadParameter("A fresh paired recheck requires --cohort production without --diagnostic or --jobs")
+        if recheck_mode not in MODES or (recheck_pair == RecheckPair.AB and recheck_mode == "stored"):
+            raise typer.BadParameter("Select nominal or full for the framework budget, or any original AC mode")
+        recheck_of = recheck_of.resolve(strict=True)
+        if result.exists() or result.is_relative_to(recheck_of) or recheck_of.is_relative_to(result):
+            raise typer.BadParameter("Provide a new paired result directory outside the original journal")
     overlay, provider, payload, sdk, columnar_script, source_verification = (
         path.resolve(strict=True) for path in (overlay, provider, payload, sdk, columnar_script, source_verification)
     )
@@ -1268,19 +1482,29 @@ def run(
 
     with (ROOT / f"results/.benchmark-cpu{CPU}.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result.mkdir(parents=True, exist_ok=True)
+        recheck = None
+        if recheck_of:
+            require_no_live_attempt(recheck_of)
+            recheck = original_recheck_authority(
+                recheck_of, provenance, controller_sources, recheck_pair, recheck_scope, recheck_mode,
+            )
+            scheduled = recheck_schedule(recheck_scope, recheck_mode, recheck_pair)
+            provenance = {**provenance, "schedule": [job.details() for job in scheduled], "timing_recheck": recheck}
+        result.mkdir(parents=True, exist_ok=recheck is None)
         require_no_live_attempt(result)
         campaign = result / "campaign.json"
         if campaign.is_file():
             original = json.loads(campaign.read_text())
-            # Earlier journals included supervising code in the input artifacts.
-            # Keep each controller revision in its own invocation receipt.
-            for path in controller_sources:
-                original["identity_sha256"].pop(str(path), None)
-            if original != provenance:
+            if not compatible_journal(original, provenance, controller_sources):
                 raise ValueError(f"Configuration or artifact identity changed for {result}")
         else:
             sealed_json(campaign, provenance)
+
+        def summarize(journal):
+            if recheck:
+                return recheck_summary(journal, scheduled, recheck_pair)
+            return campaign_summary(journal)
+
         if snapshot:
             create_faithful_snapshot(snapshot, columnar_script, source_hashes)
         controllers = result / "controllers"
@@ -1297,7 +1521,7 @@ def run(
             job: accepted for job in scheduled
             if (accepted := selected_attempt(result / job.key)) is not None
         }
-        sealed_json(result / "summary.json", campaign_summary(finished))
+        sealed_json(result / "summary.json", summarize(finished))
         started = 0
         for job in scheduled:
             if job in finished:
@@ -1325,7 +1549,9 @@ def run(
             if not diagnostic:
                 proposed = {**finished, job: (attempt, receipt)}
                 try:
-                    summary = campaign_summary(proposed)
+                    if recheck:
+                        check_recheck_job(job, attempt, receipt, recheck)
+                    summary = summarize(proposed)
                 except (ValueError, AssertionError) as error:
                     receipt.update(classification="diagnostic", guard_failure=str(error))
                     sealed_json(attempt / "receipt.json", receipt)
@@ -1336,9 +1562,9 @@ def run(
             else:
                 sealed_json(attempt / "receipt.json", receipt)
             typer.echo(f"  {receipt['wall_s']['total']:.3f} s ({receipt['classification']})", err=True)
-        summary = campaign_summary(finished)
+        summary = summarize(finished)
         typer.echo(f"{summary['completed']} of {summary['planned']} jobs accepted in {result}")
-        if summary.get("quality_pass") is False:
+        if summary.get("quality_pass") is False or summary.get("ratio_qualified") is False:
             raise typer.Exit(2)
 
 
