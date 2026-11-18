@@ -248,6 +248,10 @@ def main(
             "--clockid", "CLOCK_MONOTONIC", "--timestamp", "--no-inherit", "--no-buildid-cache", "--call-graph",
             "dwarf,16384", "-o", str(data), "--", str(python.absolute()), str(demo.resolve()), str(original.absolute()),
             str(histogram), "--mode", "full", "--scope", scope, "-n", str(repeat), "--matched-read",
+            "--provider", packaged["native"]["libjets.so"]["path"], "--payload", packaged["data"]["jets.json"]["path"],
+            "--states", packaged["data"]["jet-states.json"]["path"],
+            "--histogram-spec", packaged["data"]["jet-histogram.json"]["path"],
+            "--provenance", packaged["data"]["provenance.json"]["path"],
         ]
         write_json(output / "command.json", command)
         run = run_profile(command, env, output)
@@ -266,7 +270,8 @@ def main(
             "demo": {"path": str(demo.resolve()), "sha256": digest(demo.resolve())},
             "stock_histogram": {"path": str(authority.resolve()), "sha256": digest(authority)},
             "histogram": {"path": str(histogram), "sha256": digest(histogram), "exact_stock_fields": checks},
-            "wheel": packaged, "audit": audit, "profile": {"path": str(data), "bytes": data.stat().st_size},
+            "wheel": packaged, "audit": audit,
+            "profile": {"path": str(data), "bytes": data.stat().st_size, "sha256": digest(data)},
         })
         typer.echo(f"Recorded {repeat} complete {events}-event passes, {interval['worker_cpu_floor_s']:.2f}s CPU floor.")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:

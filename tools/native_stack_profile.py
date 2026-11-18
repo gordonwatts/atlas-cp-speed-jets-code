@@ -10,7 +10,7 @@ import subprocess
 
 import typer
 
-from profile_native import write_json
+from profile_native import digest, write_json
 
 HEADER = re.compile(r"^\s*(\d+)/(\d+)\s+\[(\d+)\]\s+(\d+)\.(\d+):\s+(\d+)\s+cpu-clock(?::u)?:\s*(.*)$")
 STACK_LINE = re.compile(r"^\s*(?:0x)?[0-9a-fA-F]+\s+(.*)\s+\(([^()]*)\)(?:\s+\(inlined\))?\s*$")
@@ -202,8 +202,11 @@ def summarize(recorded: Path, perf: Path, output: Path | None = None):
     if not recording["passed"]:
         raise ValueError("Complete-pass validation is required before attributing samples")
     raw = Path(recording["profile"]["path"])
-    if raw.stat().st_size != recording["profile"]["bytes"]:
-        raise ValueError("Saved perf data size changed since recording")
+    if raw.stat().st_size != recording["profile"]["bytes"] or digest(raw) != recording["profile"]["sha256"]:
+        raise ValueError("Saved perf data changed since recording")
+    for identity in recording["wheel"]["native"].values():
+        if digest(Path(identity["path"])) != identity["sha256"]:
+            raise ValueError(f"Recorded native dependency changed before symbolization: {identity['path']}")
     timing = recording["measurement"]
     window = f"{timing['start_ns'] // 10**9}.{timing['start_ns'] % 10**9:09d},"
     window += f"{timing['end_ns'] // 10**9}.{timing['end_ns'] % 10**9:09d}"
