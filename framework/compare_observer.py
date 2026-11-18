@@ -92,7 +92,8 @@ def compare(reference: Path, framework: Path, output: Path, jvt_only: bool = Fal
             require(a_weights == b_weights, "weight-only systematic enumeration differs from stock")
         a_fields, b_fields = fields(a_tree, jvt_only), fields(b_tree, jvt_only)
         if nominal:
-            a_fields = {key for key in a_fields if key.endswith("_NOSYS")}
+            variations = tuple(f"_{state}" for state in a_states if state != "NOSYS")
+            a_fields = {key for key in a_fields if not key.endswith(variations)}
         require(a_fields == b_fields, f"observer branches differ: {sorted(a_fields ^ b_fields)[:12]}")
         identity = list(EVENT_KEYS) + ["sr_index_NOSYS", "lr_index_NOSYS"]
         a_identity = a_tree.arrays(identity, entry_stop=events, how=dict)
