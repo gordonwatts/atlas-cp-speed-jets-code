@@ -22,6 +22,7 @@ CPU = 3
 REPETITIONS = 4
 MAX_COEFFICIENT_OF_VARIATION = 0.05
 MAX_DEVIATION_FROM_MEDIAN = 0.10
+ROOT_DISCOVERY_COMMANDS = {"bash", "sh", "ls", "coreutils", "g++", "cc1plus", "sed", "ldd"}
 
 
 def release_environment() -> dict[str, str]:
@@ -43,8 +44,8 @@ def sample_activity() -> dict:
     return {"monotonic": time.monotonic(), "cpu_stat": counters, "processes": snapshot.stdout}
 
 
-def sample_worker(pid: int, threads: set[int], cpus: set[str], libraries: set[str],
-                  children: set[int], capture_libraries: bool):
+def sample_workers(pid: int, threads: set[int], cpus: set[str], libraries: set[str],
+                   descendants: set[tuple], log: Path, capture_libraries: bool) -> None:
     root = Path("/proc") / str(pid)
     try:
         raw_status = (root / "status").read_text()
@@ -64,7 +65,20 @@ def sample_worker(pid: int, threads: set[int], cpus: set[str], libraries: set[st
                 parts = line.split(None, 5)
                 if len(parts) == 6 and parts[-1].startswith("/") and ".so" in parts[-1]:
                     libraries.add(parts[-1])
-        children.update(int(value) for value in (root / "task" / str(pid) / "children").read_text().split())
+        pending = (root / "task" / str(pid) / "children").read_text().split()
+        if not pending:
+            return
+        during_events = b"Processing events " in log.read_bytes()
+        for child in pending:
+            child_root = Path("/proc") / child
+            try:
+                status = dict(line.split(":\t", 1) for line in
+                              (child_root / "status").read_text().splitlines() if ":\t" in line)
+                descendants.add((int(child), status["Name"], status["Cpus_allowed_list"],
+                                 int(status["Threads"]), during_events))
+                pending.extend((child_root / "task" / child / "children").read_text().split())
+            except (FileNotFoundError, ProcessLookupError):
+                descendants.add((int(child), "<exited>", None, 0, during_events))
     except (FileNotFoundError, ProcessLookupError):
         return
 
@@ -72,7 +86,8 @@ def sample_worker(pid: int, threads: set[int], cpus: set[str], libraries: set[st
 def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str) -> dict:
     threads, cpus, children, libraries = set(), set(), set(), set()
     before = sample_activity()
-    with (directory / f"{label}.log").open("wb") as log:
+    log_path = directory / f"{label}.log"
+    with log_path.open("wb") as log:
         start_ns = time.monotonic_ns()
         controller_start_ns = time.process_time_ns()
         worker = subprocess.Popen(["taskset", "-c", str(CPU), *command], cwd=directory,
@@ -81,7 +96,7 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
         sample = 0
         while status is None:
             if sample % 20 == 0:
-                sample_worker(worker.pid, threads, cpus, libraries, children, sample % 100 == 0)
+                sample_workers(worker.pid, threads, cpus, libraries, children, log_path, sample % 100 == 0)
             sample += 1
             pid, code, usage = os.wait4(worker.pid, os.WNOHANG)
             if pid:
@@ -106,7 +121,10 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
         "exit": status,
         "threads_seen": sorted(threads),
         "cpus_seen": sorted(cpus),
-        "child_pids_seen": sorted(children),
+        "descendant_observations": [
+            {"pid": pid, "comm": name, "cpu": affinity, "threads": count, "during_events": in_events}
+            for pid, name, affinity, count, in_events in sorted(children)
+        ],
         "libraries": sorted(libraries),
         "guest_before": before,
         "guest_after": after,
@@ -114,7 +132,14 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
     (directory / f"{label}.json").write_text(json.dumps(result, indent=2) + "\n")
     if status != 0:
         raise RuntimeError(f"{label} exited with {status}; see {directory}")
-    if threads != {1} or cpus != {str(CPU)} or children:
+    unexpected_children = [
+        child for child in result["descendant_observations"]
+        if label != "framework" or child["during_events"]
+        or child["comm"] not in ROOT_DISCOVERY_COMMANDS | {"<exited>"}
+        or child["cpu"] not in {str(CPU), None}
+        or child["threads"] > 1
+    ]
+    if threads != {1} or cpus != {str(CPU)} or unexpected_children:
         raise RuntimeError(f"{label} failed the one-CPU/one-thread check; see {directory}")
     return result
 
@@ -197,6 +222,8 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False,
         "exclude_first_run_per_mode": not (pilot or initial),
         "pid_sampling_s": 0.1,
         "exit_polling_s": 0.005,
+        "stock_startup_utilities": sorted(ROOT_DISCOVERY_COMMANDS),
+        "startup_utility_evidence": "results/reference/nominal-fork-audit-004/job.log",
         "pilot": pilot,
         "initial_full_file_cohort": initial,
         "scope_collections": scope.value,
