@@ -19,7 +19,7 @@ sha256sum "$sdk/lib/libcorrectionlib.so" "$root"/provider/*.cxx "$root"/provider
 echo "Build affinity: $(grep Cpus_allowed_list /proc/self/status)"
 cxx_flags=(-DXAOD_STANDALONE -DXAOD_ANALYSIS -DROOTCORE -O2 -g -fPIC -ffp-contract=off -I"$sdk/include" -I"$root/source/correctionlib/rapidjson/include"
            -I"$root/provider" -I"$release/include" -I"$externals/include" -I"$externals/include/eigen3")
-sources=(registry histogram eta_jes large_jms large_jmr small_jvt small_pileup small_gsc event_inputs uncertainty_components jet_uncertainty)
+sources=(registry histogram eta_jes large_jms large_jmr small_jvt small_pileup small_gsc event_inputs uncertainty_components jet_uncertainty uncertainty_node)
 for item in "${sources[@]}"; do
   echo "Compiling $item"
   g++ $(root-config --cflags) "${cxx_flags[@]}" -c "$root/provider/$item.cxx" -o "$item.o"
