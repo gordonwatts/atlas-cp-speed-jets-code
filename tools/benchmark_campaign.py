@@ -362,7 +362,7 @@ class Context:
     matched_read: bool
     projections: dict[Scope, dict]
     projection_stamps: dict[Path, tuple]
-    compact_by_default: bool
+    compact_defaults: frozenset[Scope]
 
 
 def check_materialized_payload(attempt: Path, projection: dict | None) -> str:
@@ -407,9 +407,9 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             command.extend(("--states", str(INVENTORY), "--histogram-spec", str(SPECIFICATION)))
             if job.mode != "stored":
                 command.extend(("--provider", str(context.c_provider), "--payload", str(context.c_payload)))
-        elif projection:
-            if not context.compact_by_default:
-                command.append("--compact-payload")
+        else:
+            command.extend(compact_cli_flags(job.scope, job.mode, projection is not None, context.compact_defaults))
+        if projection:
             for path in projection["shipped_component_sha256"]:
                 path = Path(path)
                 if file_stamp(path) != context.projection_stamps[path]:
@@ -615,18 +615,105 @@ def file_stamp(path: Path) -> tuple:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def script_bool_default(script: Path, name: str) -> bool | None:
+def script_entrypoint(script: Path) -> ast.FunctionDef:
     entry, = (node for node in ast.parse(script.read_text()).body if isinstance(node, ast.FunctionDef)
               and node.name == "main")
+    return entry
+
+
+def script_defaults(entry: ast.FunctionDef) -> dict[str, tuple[ast.arg, ast.expr]]:
     arguments = entry.args.posonlyargs + entry.args.args
-    defaults = zip(arguments[-len(entry.args.defaults):], entry.args.defaults)
-    for argument, default in (*defaults, *zip(entry.args.kwonlyargs, entry.args.kw_defaults, strict=True)):
-        if argument.arg == name:
-            value = ast.literal_eval(default)
-            if not isinstance(value, bool):
-                raise ValueError(f"The shipped {name} default must be a boolean")
-            return value
-    return None
+    positional = zip(arguments[len(arguments) - len(entry.args.defaults):], entry.args.defaults, strict=True)
+    keywords = zip(entry.args.kwonlyargs, entry.args.kw_defaults, strict=True)
+    return {arg.arg: (arg, value) for arg, value in (*positional, *keywords) if value is not None}
+
+
+def script_bool_default(entry: ast.FunctionDef, name: str) -> bool | None:
+    option = script_defaults(entry).get(name)
+    if option is None:
+        return None
+    value = ast.literal_eval(option[1])
+    if type(value) is not bool:
+        raise ValueError(f"The shipped {name} default must be a boolean")
+    return value
+
+
+def same_ast(node: ast.AST, source: str, mode: str = "eval") -> bool:
+    parsed = ast.parse(source, mode=mode)
+    expected = parsed.body[0] if mode == "exec" else parsed.body
+    return ast.dump(node) == ast.dump(expected)
+
+
+def compact_contract(entry: ast.FunctionDef, bundle: dict) -> tuple[frozenset[Scope], bool, bool]:
+    """Read actual default scopes, support, and a separate explicit off flag."""
+    singles = frozenset({Scope.small, Scope.large})
+    options = script_defaults(entry)
+    option = options.get("compact_payload")
+    advertised = bundle.get("demo_defaults")
+    indexed = "scope_index" in bundle
+    if indexed != (option is not None):
+        raise ValueError("The visible compact option and sealed payload index disagree")
+
+    nullable = option is not None and ast.literal_eval(option[1]) is None
+    if nullable:
+        # Match the generated guard and RHS rather than treating None as false.
+        guards = [
+            node for node in entry.body if isinstance(node, ast.If)
+            and same_ast(node.test, "compact_payload is None")
+        ]
+        if len(guards) != 1 or len(guards[0].body) != 1 or guards[0].orelse:
+            raise ValueError("The visible nullable compact option has no single default scope guard")
+        assign = guards[0].body[0]
+        if not isinstance(assign, ast.Assign) or not isinstance(assign.value, ast.BoolOp):
+            raise ValueError("The visible compact default does not test the bundled payload and scope")
+        scope_test = assign.value.values[-1]
+        if not isinstance(scope_test, ast.Compare) or len(scope_test.comparators) != 1:
+            raise ValueError("The visible compact default does not declare literal scopes")
+        scope_values = ast.literal_eval(scope_test.comparators[0])
+        if (type(scope_values) is not tuple or set(scope_values) - {item.value for item in singles}
+                or len(set(scope_values)) != len(scope_values)
+                or not same_ast(assign, f"compact_payload = packaged_payload and scope.value in {scope_values!r}", "exec")):
+            raise ValueError("The visible compact default scope expression changed")
+        declaration = option[0].annotation
+        if declaration is None or not any(
+            isinstance(node, ast.Constant) and node.value == "--compact-payload/--no-compact-payload"
+            for node in ast.walk(declaration)
+        ):
+            raise ValueError("The visible compact option has no explicit on/off switch")
+        actual = frozenset(Scope(scope) for scope in scope_values)
+    else:
+        actual = singles if script_bool_default(entry, "compact_payload") else frozenset()
+
+    if advertised is not None:
+        declared = advertised["compact_payload_default_scopes"]
+        reuse_gate = ('reuse_nominal_nnjvt_update = reuse_nominal_nnjvt_update '
+                      'and mode == Mode.full and "sr" in selected')
+        if (type(declared) is not list or len(set(declared)) != len(declared)
+                or set(declared) != {scope.value for scope in actual}
+                or advertised["scope"] != "both" or advertised["mode"] != "full"
+                or not same_ast(options["scope"][1], "Scope.both")
+                or not same_ast(options["mode"][1], "Mode.full")
+                or type(advertised["reuse_nominal_nnjvt_update"]) is not bool
+                or script_bool_default(entry, "reuse_nominal_nnjvt_update")
+                != advertised["reuse_nominal_nnjvt_update"]
+                or advertised["reuse_nominal_nnjvt_update_modes"] != ["full"]
+                or advertised["reuse_nominal_nnjvt_update_scopes"] != ["small", "both"]
+                or sum(same_ast(node, reuse_gate, "exec") for node in entry.body) != 1):
+            raise ValueError("The visible default configuration differs from the sealed bundle")
+    elif nullable:
+        raise ValueError("The visible nullable compact defaults require the sealed demo_defaults receipt")
+    return actual, indexed, nullable
+
+
+def compact_cli_flags(scope: Scope, mode: str, projected: bool,
+                      defaults: frozenset[Scope]) -> tuple[str, ...]:
+    if scope == Scope.combined or mode == "stored":
+        return ()
+    if projected and scope not in defaults:
+        return ("--compact-payload",)
+    if not projected and scope in defaults:
+        return ("--no-compact-payload",)
+    return ()
 
 
 def projection_node_hashes(canonical: Path, layout: dict, manifest: dict, scope: Scope,
@@ -779,7 +866,7 @@ def scoped_columnar_proof(path: Path, shipped: Path, scope: Scope, selected: Pat
             or sha256(Path(proof["provider"])) not in verified_provider
             or sha256(Path(proof["runtime"]["core"])) not in verified_core
             or proof.get("reuse_nominal_nnjvt_update", False)
-            != bool(script_bool_default(script, "reuse_nominal_nnjvt_update"))):
+            != bool(script_bool_default(script_entrypoint(script), "reuse_nominal_nnjvt_update"))):
         raise ValueError(f"Scoped C object receipt does not cover the actual projected bytes: {path}")
     check = json.loads(shipped.read_text())
     installation = check["installation"]
@@ -1042,22 +1129,10 @@ def run(
     scopes = set(compact_scope or ())
     if Scope.combined in scopes:
         raise typer.BadParameter("Combined calibration uses the canonical document")
-    compact_by_default = False
-    if cohort == Cohort.production:
-        default = script_bool_default(physical_script, "compact_payload")
-        if scopes and default is None:
-            raise typer.BadParameter("The shipped script does not expose compact payload loading")
-        if default is True:
-            defaults = {Scope.small, Scope.large}
-            if scopes and scopes != defaults:
-                raise typer.BadParameter("The shipped script defaults to both single-collection projections")
-            scopes = defaults
-            compact_by_default = True
     if scopes and cohort != Cohort.production:
         raise typer.BadParameter("Scoped payload production requires the shipped wheel")
-    if bool(scopes) != bool(payload_partition) or bool(scopes) != bool(scoped_acceptance):
-        raise typer.BadParameter("Selected projections require a partition and per-scope acceptance manifest")
     wheel_proof = None
+    compact_defaults = frozenset()
     if wheel:
         wheel_proof = wheel.with_name("bundle.json")
         bundle = json.loads(wheel_proof.read_text())
@@ -1067,6 +1142,20 @@ def run(
                 or bundle["payload"]["sha256"] != sha256(payload)
                 or wheel_members["data"]["jets.json"] != sha256(payload)):
             raise ValueError("Production framework, visible script, or wheel differs from the bundle receipt")
+        with zipfile.ZipFile(wheel) as archive:
+            build = json.loads(archive.read("atlas_jet_demo/data/build.json"))
+        if (build.get("demo_defaults") != bundle.get("demo_defaults")
+                or build.get("scope_index") != bundle.get("scope_index")
+                or ("visible_source" in build and build["visible_source"] != identity(physical_script))):
+            raise ValueError("Production wheel and bundle default or visible-source receipts differ")
+        compact_defaults, supports_compact, supports_override = compact_contract(script_entrypoint(physical_script), bundle)
+        if scopes and not supports_compact:
+            raise typer.BadParameter("The shipped script does not expose compact payload loading")
+        scopes = scopes or set(compact_defaults)
+        if not supports_override and compact_defaults - scopes:
+            raise typer.BadParameter("This earlier shipped script cannot turn off a default projection")
+    if bool(scopes) != bool(payload_partition) or bool(scopes) != bool(scoped_acceptance):
+        raise typer.BadParameter("Selected projections require a partition and per-scope acceptance manifest")
     if cohort == Cohort.faithful and (sha256(provider) != sha256(columnar_provider)
                                      or sha256(payload) != sha256(columnar_payload)):
         raise ValueError("Faithful paths B and C must use the same native provider and payload")
@@ -1156,13 +1245,17 @@ def run(
     }
     if projections:
         provenance["projected_payloads"] = {scope.value: receipt for scope, receipt in projections.items()}
-        provenance["compact_by_default"] = compact_by_default
+        # Keep the schema of earlier one-switch production journals.
+        if bundle.get("demo_defaults") is None:
+            provenance["compact_by_default"] = bool(compact_defaults)
+        else:
+            provenance["compact_default_scopes"] = sorted(scope.value for scope in compact_defaults)
         provenance["scoped_acceptance_sha256"] = sha256(scoped_acceptance)
     context = Context(
         cohort, input_file, source, framework_python, framework_env, overlay_env, columnar_env,
         libraries, provider, core, columnar_python, physical_script, columnar_sources,
         columnar_provider, columnar_payload, wheel_members, matched_read, projections, projection_stamps,
-        compact_by_default,
+        compact_defaults,
     )
 
     with (ROOT / f"results/.benchmark-cpu{CPU}.lock").open("a+") as lock:
