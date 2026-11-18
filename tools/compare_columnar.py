@@ -192,6 +192,7 @@ def main(
     chunk: Annotated[int, typer.Option("--chunk", min=1)] = 32,
     histogram_a: Annotated[Path | None, typer.Option("--histogram-a")] = None,
     histogram_c: Annotated[Path | None, typer.Option("--histogram-c")] = None,
+    distributions: Annotated[Path | None, typer.Option(help="Write independent endpoint distributions in a new directory")] = None,
 ):
     """Record exact per-object, event, and status agreement for configured states."""
     execution = check_execution()
@@ -209,6 +210,16 @@ def main(
     expected = reference_branches(selected, states, ff_names, stage, mode)
     diagnostic = Diagnostics({**expected, **{key: "identity" for key in EVENT_KEYS}})
     plan = branch_plan(selected, mode, diagnostics=True, stage=stage)
+
+    recorder = None
+    if distributions is not None:
+        if mode == Mode.stored or stage != "final":
+            raise typer.BadParameter("Endpoint distributions require a calibrated final comparison")
+        if distributions.exists():
+            raise FileExistsError(distributions)
+        from columnar.distributions import EndpointDistributions
+
+        recorder = EndpointDistributions(states, WEIGHT_DIRECTIONS, VALID)
 
     nodes = buffers = None
     if mode != Mode.stored and stage not in ("stored", "const"):
@@ -241,6 +252,8 @@ def main(
                 for field, values in identities.items():
                     diagnostic.compare(field, reference[field], values, identities, start)
                 seen_here = set()
+                if recorder is not None:
+                    recorder.begin_chunk()
                 for frame in evaluate_chunk(original_data, stop - start, selected, mode, states, ff_names,
                                             nodes, buffers, diagnose=True, through=stage):
                     for field, values in frame.fields.items():
@@ -254,6 +267,8 @@ def main(
                         seen_here.add(key)
                         diagnostic.compare(key, reference[key], values, identities, start,
                                            None if field in EVENT_FIELDS else frame.counts)
+                    if recorder is not None and frame.stage == "final":
+                        recorder.record(frame, reference)
                 missing = set(expected) - seen_here
                 if missing:
                     raise ValueError(f"Missing {len(missing)} columnar outputs: {sorted(missing)[:10]}")
@@ -291,6 +306,8 @@ def main(
     with output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, allow_nan=False)
         stream.write("\n")
+    if recorder is not None:
+        recorder.write(distributions, output, events_seen, ff_names)
     typer.echo(f"{events_seen}/{entries} events, {len(failed)} mismatching branches")
     if not passed:
         raise typer.Exit(1)
