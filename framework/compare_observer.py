@@ -1,5 +1,6 @@
 """Compare the stock and overlay observers without using converted C output."""
 from collections import Counter
+from contextlib import ExitStack
 import hashlib
 import json
 from pathlib import Path
@@ -8,6 +9,8 @@ import awkward as ak
 import numpy as np
 import typer
 import uproot
+from uproot.source.file import MemmapSource
+from uproot.source.futures import TrivialExecutor
 
 from compare_nominal import EVENT_KEYS, require, scalar
 
@@ -83,25 +86,41 @@ def difference(branch, stock, overlay, run, event):
     return result, proof
 
 
+def open_root(path):
+    return uproot.open(
+        path, handler=MemmapSource, num_fallback_workers=1, array_cache=None,
+        decompression_executor=TrivialExecutor(), interpretation_executor=TrivialExecutor(),
+    )
+
+
 @app.command()
 def compare(reference: Path, framework: Path, output: Path, jvt_only: bool = False,
             nominal: bool = False, require_full: bool = False,
-            stock_histogram: Path | None = None, framework_histogram: Path | None = None) -> None:
+            stock_histogram: Path | None = None, framework_histogram: Path | None = None,
+            reference_counters: Path | None = None, framework_counters: Path | None = None) -> None:
     """Check the independent observer identities, states, widths, values and decisions."""
-    with uproot.open(reference) as a_file, uproot.open(framework) as b_file:
+    with ExitStack() as stack:
+        a_file = stack.enter_context(open_root(reference))
+        b_file = stack.enter_context(open_root(framework))
+        if reference_counters is None and "systematicsList" not in a_file:
+            reference_counters = reference.with_name("hist-reference.root")
+        if framework_counters is None and "systematicsList" not in b_file:
+            framework_counters = framework.with_name("hist-framework.root")
+        a_counters = stack.enter_context(open_root(reference_counters)) if reference_counters else a_file
+        b_counters = stack.enter_context(open_root(framework_counters)) if framework_counters else b_file
         a_tree, b_tree = a_file["analysis"], b_file["analysis"]
         events = b_tree.num_entries
         require(0 < events <= a_tree.num_entries, "invalid framework interval")
         if require_full:
             require(events == a_tree.num_entries, "framework stopped before the stock observer endpoint")
-        a_states = a_file["systematicsList"].axis().labels()
-        b_states = b_file["systematicsList"].axis().labels()
+        a_states = a_counters["systematicsList"].axis().labels()
+        b_states = b_counters["systematicsList"].axis().labels()
         if nominal:
             require(b_states == ["NOSYS"], f"unexpected nominal service states: {b_states}")
         else:
             require(a_states == b_states, "service systematic enumeration differs from stock")
-        a_weights = a_file["systematicsListOnlyWeights"].axis().labels()
-        b_weights = b_file["systematicsListOnlyWeights"].axis().labels()
+        a_weights = a_counters["systematicsListOnlyWeights"].axis().labels()
+        b_weights = b_counters["systematicsListOnlyWeights"].axis().labels()
         if nominal:
             require(not b_weights or b_weights == [""], f"unexpected nominal weight states: {b_weights}")
         else:
@@ -157,6 +176,8 @@ def compare(reference: Path, framework: Path, output: Path, jvt_only: bool = Fal
     with output.open("x") as stream:
         json.dump({
             "reference": str(reference), "framework": str(framework),
+            "reference_counters": str(reference_counters or reference),
+            "framework_counters": str(framework_counters or framework),
             "events": events, "service_states": len(b_states), "service_state_labels": b_states,
             "weight_only_states": b_weights,
             "histograms": histogram_proof, "exact_histogram_parity": exact_histograms if histogram_proof else None,

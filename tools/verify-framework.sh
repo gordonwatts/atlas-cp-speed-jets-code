@@ -61,12 +61,18 @@ python="$root/.reference-venv/bin/python"
 "$python" tools/reference/workflow.py histogram "$result/framework.root" config/jet-states.json \
   config/jet-histogram.json "$result/histograms.npz" full --scope combined
 "$python" framework/compare_observer.py "$reference" "$result/framework.root" "$result/observer-comparison.json" \
-  --require-full --stock-histogram "$stock_histogram" --framework-histogram "$result/histograms.npz"
+  --require-full --stock-histogram "$stock_histogram" --framework-histogram "$result/histograms.npz" \
+  > "$result/observer-comparison.log" 2>&1
 
 input_record=$(cat "$result/input.stat")
 input="${input_record#* }"
 "$python" tools/reference/verify_observer.py "$result/framework.root" "$input" config/jet-states.json \
-  "$result/initialized-tools.tsv" "$result/reference-coverage.json" "$events"
-sha256sum "$reference" "$stock_histogram" "$result/framework.root" "$result/histograms.npz" \
+  "$result/initialized-tools.tsv" "$result/reference-coverage.json" "$events" \
+  > "$result/reference-coverage.log" 2>&1
+counter_path=$("$python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["reference_counters"])' \
+  "$result/observer-comparison.json")
+authority=("$reference")
+if [[ "$counter_path" != "$reference" ]]; then authority+=("$counter_path"); fi
+sha256sum "${authority[@]}" "$stock_histogram" "$result/framework.root" "$result/histograms.npz" \
   "$result/observer-comparison.json" "$result/reference-coverage.json" "$result/process-verification.json" \
   > "$result/acceptance.sha256"
