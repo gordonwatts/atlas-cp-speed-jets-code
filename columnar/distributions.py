@@ -107,7 +107,7 @@ class Distribution:
         self.residual[index] += bin_counts(delta, RESIDUAL)
         self.max_abs_residual[index] = max(self.max_abs_residual[index], np.max(np.abs(delta), initial=0.0))
 
-    def persist(self, key, arrays):
+    def persist(self, key, arrays, states):
         arrays[f"{key}_edges"] = self.edges
         arrays[f"{key}_stock_counts"] = self.stock
         arrays[f"{key}_direct_counts"] = self.direct
@@ -119,9 +119,18 @@ class Distribution:
         arrays[f"{key}_unpaired_chunks"] = self.unpaired_chunks
         arrays[f"{key}_exact_mismatches"] = self.exact_mismatches
         arrays[f"{key}_max_abs_residual"] = self.max_abs_residual
+        absolute_change = np.abs(self.stock[1:] - self.stock[0]).sum(axis=1)
+        ascending = np.argsort(absolute_change, kind="stable")
+        examples = {}
+        if ascending.size:
+            for label, rank in (("low", 0), ("median", (ascending.size - 1) // 2), ("high", ascending.size - 1)):
+                offset = ascending[rank]
+                examples[label] = {"state": states[offset + 1], "stock_l1_bin_count_change": int(absolute_change[offset])}
         return {
             "unit": self.observable.unit,
+            "edges": self.edges.tolist(),
             "stock_and_direct_bin_mismatches_per_state": np.count_nonzero(self.stock != self.direct, axis=1).tolist(),
+            "representative_shift_states": examples,
             "plot_nominal_quantiles": {
                 "stock": representative_bins(self.stock[0], self.edges.tolist()),
                 "direct": representative_bins(self.direct[0], self.edges.tolist()),
@@ -187,7 +196,7 @@ class EndpointDistributions:
         collections = {}
         for prefix, states in self.states.items():
             arrays[f"{prefix}_states"] = np.asarray(states)
-            observables = {field: distribution.persist(f"{prefix}_{field}", arrays)
+            observables = {field: distribution.persist(f"{prefix}_{field}", arrays, states)
                            for field, distribution in self.distributions[prefix].items()}
             collections[prefix] = {
                 "observables": observables,
@@ -214,10 +223,11 @@ class EndpointDistributions:
                 "axes": {"counts": ["state", "bin"], "state_axis": "per-collection manifest order"},
                 "bin_convention": "underflow, half-open [edge[i], edge[i+1]) bins, overflow; NaN counted separately",
                 "paired_residual": "direct minus stock in the displayed unit for finite pairs in event/object order",
+                "representative_shift_states": "low, lower median and high L1 bin-count changes relative to stock NOSYS; includes flows and uses manifest order to break ties",
                 "input_population": "all original jets before final selections; event SF has one value per event",
                 "effective_weight": "raw per-jet SF when validity accepts, otherwise 1",
                 "correction_status_codes": KNOWN_STATUS,
                 "selection_codes": "small NNJvt booleans and large unsigned selection masks; all-one mask accepts",
                 "collections": collections,
-            }, output, indent=2)
+            }, output, indent=2, allow_nan=False)
             output.write("\n")
