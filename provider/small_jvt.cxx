@@ -169,6 +169,49 @@ protected:
   }
 };
 
+#ifdef JETS_NNJVT_REUSE_INPUTS
+// FastGraph reads NodeVec synchronously. An eligible call owns this buffer
+// until compute returns, and the recursive path keeps its own original input.
+class NnJvtInputLease {
+  struct Scratch {
+    jets::portable::JvtNetworkNodes nodes;
+    bool occupied = false;
+  };
+
+public:
+  NnJvtInputLease() {
+    static constinit thread_local Scratch scratch;
+    if (scratch.occupied) return;
+    scratch.occupied = true;
+    try {
+      if (scratch.nodes.empty()) {
+        jets::portable::JvtNetworkNodes nodes(1);
+        nodes.front().resize(4);
+        scratch.nodes.swap(nodes);
+      }
+      scratch_ = &scratch;
+    } catch (...) {
+      scratch.occupied = false;
+      throw;
+    }
+  }
+
+  ~NnJvtInputLease() {
+    if (scratch_) scratch_->occupied = false;
+  }
+
+  NnJvtInputLease(const NnJvtInputLease&) = delete;
+  NnJvtInputLease& operator=(const NnJvtInputLease&) = delete;
+
+  jets::portable::JvtNetworkNodes* get() const noexcept {
+    return scratch_ ? &scratch_->nodes : nullptr;
+  }
+
+private:
+  Scratch* scratch_ = nullptr;
+};
+#endif
+
 class NnJvtUpdate final : public ArrayNode {
 public:
   NnJvtUpdate(const PluginConfig& config, const PluginContext& context)
@@ -211,9 +254,22 @@ public:
     size_t pt_bin, eta_bin;
     if (!(pt <= max_pt_) || !cuts_.bins(pt, eta, pt_bin, eta_bin)) return;
 
+#ifdef JETS_NNJVT_REUSE_INPUTS
+    const auto predicted = [&] {
+      NnJvtInputLease lease;
+      if (auto* nodes = lease.get()) {
+        nodes->front() << rpt, as_float(values, jvf_), static_cast<float>(pt_bin), static_cast<float>(eta_bin);
+        return network_->compute(*nodes);
+      }
+      jets::portable::JvtNetworkFeatures inputs(4);
+      inputs << rpt, as_float(values, jvf_), static_cast<float>(pt_bin), static_cast<float>(eta_bin);
+      return network_->compute(jets::portable::JvtNetworkNodes{std::move(inputs)});
+    }();
+#else
     jets::portable::JvtNetworkFeatures inputs(4);
     inputs << rpt, as_float(values, jvf_), static_cast<float>(pt_bin), static_cast<float>(eta_bin);
     const auto predicted = network_->compute(jets::portable::JvtNetworkNodes{std::move(inputs)});
+#endif
     const float score = static_cast<float>(predicted(0));
     output[0] = score;
     output[2] = score > cuts_.cuts[pt_bin][eta_bin];

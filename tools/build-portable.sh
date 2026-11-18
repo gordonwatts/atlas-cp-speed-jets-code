@@ -21,6 +21,7 @@ for choice in "${@:4}"; do
     rng-cache-large) jets_candidate_defines+=(-DJETS_RNG_CACHE -DJETS_RNG_CACHE_LARGE) ;;
     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
     large-jmr-match-cache) jets_candidate_defines+=(-DJETS_LARGE_JMR_MATCH_CACHE) ;;
+    nnjvt-inputs) jets_candidate_defines+=(-DJETS_NNJVT_REUSE_INPUTS) ;;
     unsigned-sign-pairs) jets_candidate_defines+=(-DJETS_UNSIGNED_SIGN_PAIRS) ;;
     uncertainty-batch) jets_candidate_defines+=(-DJETS_UNCERTAINTY_BATCH) ;;
     nominal-resolution-cache) jets_candidate_defines+=(-DJETS_NOMINAL_RESOLUTION_CACHE) ;;
