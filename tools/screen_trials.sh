@@ -21,8 +21,11 @@ done
 unset PYTHONPATH PYTHONHOME
 export PYTHONDONTWRITEBYTECODE=1
 if "$py" -c 'import json,sys; sys.exit(not json.load(open(sys.argv[1])).get("compiler_only_runtime"))' "$plan"; then
-  source /cvmfs/sft.cern.ch/lcg/releases/gcc/15.2.0-35657/x86_64-el9/setup.sh
-  export LD_LIBRARY_PATH="$(dirname "$(g++ -print-file-name=libstdc++.so)")"
+  gcc_lib=/cvmfs/sft.cern.ch/lcg/releases/gcc/15.2.0-35657/x86_64-el9/lib64
+  test -s "$gcc_lib/libstdc++.so.6"
+  test -s "$gcc_lib/libgcc_s.so.1"
+  unset LD_PRELOAD
+  export LD_LIBRARY_PATH="$gcc_lib"
 else
   source tools/reference/setup.sh
   unset PYTHONPATH PYTHONHOME

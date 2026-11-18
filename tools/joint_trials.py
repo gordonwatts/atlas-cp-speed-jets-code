@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "results/build"
 EXPORT = ROOT / "results/export"
 REFERENCE = ROOT / "results/reference"
-COMPILER_SETUP = "/cvmfs/sft.cern.ch/lcg/releases/gcc/15.2.0-35657/x86_64-el9/setup.sh"
+COMPILER_LIB = Path("/cvmfs/sft.cern.ch/lcg/releases/gcc/15.2.0-35657/x86_64-el9/lib64")
 SCOPES = ("small", "large", "both")
 FAMILIES = ("rng-size", "variable-flow", "jmr-match", "generic-core", "packed-eta-jes", "packed-scope")
 THREAD_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
@@ -76,7 +76,7 @@ class Build:
         return {"python": str(directory / "venv/bin/python"), "sdk": str(sdk)}
 
     def provider(self, name):
-        self.require(name)
+        self.require("generic-provider" if name == "generic" else name)
         result = BUILD / f"joint-{name}-{self.label}"
         sdk = self.generic["sdk"] if name == "generic" else self.regular["sdk"]
         provider, core = result / "libjets.so", Path(sdk) / "lib/libcorrectionlib.so"
@@ -118,10 +118,9 @@ def clean_env():
 
 def resolve_environments(directory):
     base = clean_env()
-    gcc = subprocess.check_output(
-        ["bash", "-c", 'source "$1" >&2 || exit; dirname "$(g++ -print-file-name=libstdc++.so)"',
-         "setup-gcc", COMPILER_SETUP], cwd=directory, env=base, text=True).strip()
-    compiler = {**base, "LD_LIBRARY_PATH": str(Path(gcc).resolve(strict=True))}
+    for runtime in ("libstdc++.so.6", "libgcc_s.so.1"):
+        (COMPILER_LIB / runtime).resolve(strict=True)
+    compiler = {**base, "LD_LIBRARY_PATH": str(COMPILER_LIB)}
     with (directory / "release-setup.log").open("x") as log:
         stock = subprocess.check_output(
             ["bash", "-c", 'source "$1" >&2 || exit; env -0',
