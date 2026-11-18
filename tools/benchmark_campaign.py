@@ -912,6 +912,40 @@ def compact_contract(entry: ast.FunctionDef, bundle: dict) -> tuple[frozenset[Sc
     return actual, indexed, nullable
 
 
+def signed_pair_contract(entry: ast.FunctionDef, bundle: dict) -> frozenset[Scope]:
+    """Check the shipped internal gate against the sealed demo scope list."""
+    setting = "reuse_uncertainty_sign_pairs"
+    field = "reuse_uncertainty_sign_pair_scopes"
+    defaults = bundle.get("demo_defaults") or {}
+    configured = defaults.get(field, [])
+    visible_scopes = {"small": Scope.small, "large": Scope.large, "both": Scope.combined}
+    if (type(configured) is not list
+            or any(type(scope) is not str or scope not in visible_scopes for scope in configured)
+            or len(set(configured)) != len(configured)):
+        raise ValueError("The sealed signed-state scopes must be a list of distinct small, large or both values")
+    flags = {"--reuse-uncertainty-sign-pairs", "--no-reuse-uncertainty-sign-pairs"}
+    for node in ast.walk(entry.args):
+        if (isinstance(node, ast.arg) and node.arg == setting
+                or isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and flags.intersection(node.value.split("/"))):
+            raise ValueError("The shipped demo must keep signed-state reuse out of its CLI")
+
+    ordered = tuple(scope for scope in visible_scopes if scope in configured)
+    gate = f"{setting} = mode == Mode.full and scope.value in {ordered!r}"
+    names = [node for node in ast.walk(entry) if isinstance(node, ast.Name) and node.id == setting]
+    stores = [node for node in names if isinstance(node.ctx, (ast.Store, ast.Del))]
+    allowed = (gate,) if field in defaults else (gate, f"{setting} = False")
+    assignments = [node for node in entry.body if any(same_ast(node, line, "exec") for line in allowed)]
+    forwarded = [node for node in ast.walk(entry) if isinstance(node, ast.keyword) and node.arg == setting]
+    if field in defaults or names:
+        if (len(stores) != 1 or len(assignments) != 1 or len(forwarded) != 1
+                or not same_ast(forwarded[0].value, setting)):
+            raise ValueError("The visible signed-state reuse gate differs from the sealed bundle")
+    elif any(not same_ast(node.value, "False") for node in forwarded):
+        raise ValueError("The visible script enables signed-state reuse without a sealed declaration")
+    return frozenset(visible_scopes[scope] for scope in ordered)
+
+
 def compact_cli_flags(scope: Scope, mode: str, projected: bool,
                       defaults: frozenset[Scope]) -> tuple[str, ...]:
     if scope == Scope.combined or mode == "stored":
@@ -1063,8 +1097,10 @@ def scoped_framework_proof(path: Path, scope: Scope, selected: Path, source: Pat
 
 def scoped_columnar_proof(path: Path, shipped: Path, scope: Scope, selected: Path,
                           authority: Path, source: Path, source_uuid: str, verified_provider: set,
-                          verified_core: set, wheel: Path, script: Path) -> dict:
+                          verified_core: set, wheel: Path, script: Path, *,
+                          reuse_uncertainty_sign_pairs: bool = False) -> dict:
     proof = json.loads(path.read_text())
+    check_signed_pair_proof(proof, path, reuse_uncertainty_sign_pairs)
     if (not proof["passed"] or proof["scope"] != scope.value or proof["mode"] != "full"
             or proof["stage_limit"] != "final" or proof["entries_compared"] != EVENTS
             or Path(proof["authority"]).resolve() != authority
@@ -1104,7 +1140,8 @@ def scoped_columnar_proof(path: Path, shipped: Path, scope: Scope, selected: Pat
 def verified_projections(partition: Path, acceptance: Path, scopes: set[Scope], canonical: Path,
                          wheel: Path, bundle: dict, script: Path, interpreter: Path, source: Path,
                          source_uuid: str, authority: Path, provider: Path, core: Path,
-                         libraries: dict, wheel_members: dict, inventory: dict) -> dict[Scope, dict]:
+                         libraries: dict, wheel_members: dict, inventory: dict, *,
+                         signed_pair_scopes: frozenset[Scope] = frozenset()) -> dict[Scope, dict]:
     manifest_path = partition / "manifest.json"
     index = partition / "payload-index.json"
     manifest = json.loads(manifest_path.read_text())
@@ -1174,14 +1211,21 @@ def verified_projections(partition: Path, acceptance: Path, scopes: set[Scope], 
                 evidence["c_objects"], evidence["c_shipped"], scope, target, authority, source, source_uuid,
                 {sha256(provider), wheel_members["native"]["libjets.so"]},
                 {sha256(core), wheel_members["native"]["libcorrectionlib.so"]}, wheel, script,
+                reuse_uncertainty_sign_pairs=scope in signed_pair_scopes,
             ),
         }
     return results
 
 
+def check_signed_pair_proof(proof: dict, path: Path, enabled: bool) -> None:
+    if proof.get("reuse_uncertainty_sign_pairs", False) is not enabled:
+        raise ValueError(f"Direct PHYSLITE verification used a different signed-state reuse setting: {path}")
+
+
 def verify_acceptance(b: Path | None, c: Path | None, diagnostic: bool, overlay: Path,
                       provider: Path, payload: Path, core: Path, *,
-                      production_input: tuple[Path, str, bool] | None = None) -> dict:
+                      production_input: tuple[Path, str, bool] | None = None,
+                      reuse_uncertainty_sign_pairs: bool = False) -> dict:
     proofs = {}
     if not diagnostic and (b is None or c is None):
         raise ValueError("Supply accepted full-file observer receipts for both converted paths")
@@ -1198,6 +1242,7 @@ def verify_acceptance(b: Path | None, c: Path | None, diagnostic: bool, overlay:
         proofs["B"] = {"path": str(b), "sha256": sha256(b), "authority": proof["reference"]}
     if c:
         proof = json.loads(c.read_text())
+        check_signed_pair_proof(proof, c, reuse_uncertainty_sign_pairs)
         if (proof["entries_compared"] != EVENTS or proof["scope"] != "both" or proof["mode"] != "full"
                 or proof["stage_limit"] != "final" or not proof["passed"]):
             raise ValueError(f"Incomplete or failing direct PHYSLITE verification in {c}")
@@ -1367,6 +1412,7 @@ def run(
         raise typer.BadParameter("Scoped payload production requires the shipped wheel")
     wheel_proof = None
     compact_defaults = frozenset()
+    signed_pair_scopes = frozenset()
     reuse_nnjvt = False
     if wheel:
         wheel_proof = wheel.with_name("bundle.json")
@@ -1385,6 +1431,7 @@ def run(
             raise ValueError("Production wheel and bundle default or visible-source receipts differ")
         entry = script_entrypoint(physical_script)
         compact_defaults, supports_compact, supports_override = compact_contract(entry, bundle)
+        signed_pair_scopes = signed_pair_contract(entry, bundle)
         reuse_nnjvt = bool(script_bool_default(entry, "reuse_nominal_nnjvt_update"))
         if scopes and not supports_compact:
             raise typer.BadParameter("The shipped script does not expose compact payload loading")
@@ -1402,8 +1449,10 @@ def run(
     input_file = Path(input_spec["path"])
 
     production_input = (input_file, source["source_file_uuid"], reuse_nnjvt) if wheel else None
-    proofs = verify_acceptance(b_verification, c_verification, diagnostic, overlay, provider, payload, core,
-                               production_input=production_input)
+    proofs = verify_acceptance(
+        b_verification, c_verification, diagnostic, overlay, provider, payload, core,
+        production_input=production_input, reuse_uncertainty_sign_pairs=Scope.combined in signed_pair_scopes,
+    )
     if c_verification:
         c_source = Path(proofs["C"]["provider"])
         c_core = Path(proofs["C"]["core"])
@@ -1450,6 +1499,7 @@ def run(
             payload_partition.resolve(strict=True), scoped_acceptance.resolve(strict=True), scopes,
             payload, wheel, bundle, physical_script, columnar_python, input_file, source["source_file_uuid"],
             independent_stock, provider, core, libraries, wheel_members, inventory,
+            signed_pair_scopes=signed_pair_scopes,
         )
         for projection in projections.values():
             selected = projection["document"]
