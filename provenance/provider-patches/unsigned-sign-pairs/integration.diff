@@ -495,10 +495,10 @@ index f1be546..ae1ecfe 100644
          json.dump(report, stream, indent=2, allow_nan=False)
 diff --git a/tools/test_unsigned_sign_pairs.py b/tools/test_unsigned_sign_pairs.py
 new file mode 100644
-index 0000000..9eb5c0b
+index 0000000..27fe981
 --- /dev/null
 +++ b/tools/test_unsigned_sign_pairs.py
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,218 @@
 +"""Exercise the opt-in signed-pair lease through the original CorrectionLib APIs."""
 +
 +import ctypes as ct
@@ -677,6 +677,25 @@ index 0000000..9eb5c0b
 +        equal(lease.evaluate(primary.evaluate, *original, "shared/two"), expected)
 +        assert hits() == 0
 +    evidence["unscoped native interleaving breaks pair"] = True
++
++    scalar_rows = [
++        [value[i].item() if isinstance(value, np.ndarray) else value for value in original]
++        for i in range(4)
++    ]
++    requested = [(primary if i < 2 else other, row) for i, row in enumerate(scalar_rows)]
++    independent = [node.evaluate(*row, "shared/one") for node, row in requested]
++    with buffers.unsigned_sign_pairs(4) as lease:
++        lease.call("jets_unsigned_pair_begin_state")
++        try:
++            for (node, row), expected_row in zip(requested, independent, strict=True):
++                equal(node.evaluate(*row, "shared/one"), expected_row)
++        except BaseException:
++            lease.call("jets_unsigned_pair_end_state", 0)
++            raise
++        lease.call("jets_unsigned_pair_end_state", 1)
++        equal(lease.evaluate(primary.evaluate, *original, "shared/two"), expected)
++        assert hits() == 0
++    evidence["mixed model rows invalidate a state window"] = True
 +
 +    status = primary.evaluate(*original, "shared/two")
 +    assert status[:, 4].tolist()[:2] == [2.0, 2.0]
