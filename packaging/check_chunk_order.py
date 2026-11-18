@@ -253,6 +253,7 @@ def screen(
     output: Path,
     scope: Annotated[Scope | None, typer.Option(help="Screen one scope. By default, screen small, large and both.")] = None,
     candidate: Annotated[int | None, typer.Option(help="Repeat a rotated pair of this screened size and 1000.")] = None,
+    project_single: Annotated[bool, typer.Option(help="Charge the actual indexed single-radius load in all arms.")] = False,
 ):
     """Screen physical chunk sizes on the original full file through the uninstrumented installed command."""
     require_cpu()
@@ -260,11 +261,13 @@ def screen(
     installation, reference, output = (path.resolve() for path in (installation, reference, output))
     commands, installed = installed_commands(installation)
     scopes = [scope] if scope else list(Scope)
+    if project_single and scope not in (Scope.small, Scope.large):
+        raise typer.BadParameter("Select one radius when explicitly charging projected loading")
     if candidate is not None and candidate not in (256, 4000):
         raise typer.BadParameter("The bounded repeat must use one of the screened alternatives, 256 or 4000")
     defaults = installed.get("demo_defaults")
     output.mkdir()
-    index = installed_index(installation) if defaults and defaults["compact_payload_default_scopes"] else {}
+    index = installed_index(installation) if project_single or (defaults and defaults["compact_payload_default_scopes"]) else {}
     measurements = {}
     quality = {}
     for chosen in scopes:
@@ -283,7 +286,8 @@ def screen(
             case.mkdir()
             histograms = case / "histograms.npz"
             process = run_leg(
-                command(commands["pip"], original, histograms, chosen, "full", FULL_EVENTS, ["--chunk", str(chunk)]),
+                command(commands["pip"], original, histograms, chosen, "full", FULL_EVENTS,
+                        ["--chunk", str(chunk)] + (["--compact-payload"] if project_single else [])),
                 CLEAN_ENV, case, "installed", event_source=original,
             )
             compare(expected, histograms)
@@ -294,7 +298,7 @@ def screen(
                 raise ValueError(f"Could not verify the timed process used the frozen file in {case}")
             if row and branch_hash != next(iter(row.values()))["branch_sha256"]:
                 raise ValueError(f"Physical branch plan changed for {chosen.value}")
-            requested_default = defaults and chosen.value in defaults["compact_payload_default_scopes"]
+            requested_default = project_single or (defaults and chosen.value in defaults["compact_payload_default_scopes"])
             observed = projection_receipt(log, index[chosen.value] if requested_default else None) if defaults else {}
             row[label] = {
                 "round": r, "chunk_events": chunk,
@@ -313,7 +317,7 @@ def screen(
     _report(output / "summary.json", {
         "classification": ("Single-pass chunk-size engineering screen" if candidate is None else
                            "Fresh original-file four-round chunk-size pairs, first observation excluded"),
-        "quality": quality,
+        "quality": quality, "explicit_scoped_loading": project_single,
         "installation": installed, "original": str(original), "original_uuid": dataset["tfile_uuid"],
         "events": FULL_EVENTS, "matched_read": True, "measurements": measurements,
     })
