@@ -206,12 +206,15 @@ struct JetUncertaintyModel::Impl {
       const auto parametrization = jet::CompParametrization::stringToEnum(
           settings.GetValue("FileValidHistParam", ""));
       const auto mass_definition = jet::CompMassDef::stringToEnum(settings.GetValue("FileValidHistMassDef", ""));
-      validity = std::make_unique<jet::ValidityHistogram>(
+      auto validity_histogram = std::make_unique<jet::ValidityHistogram>(
           file_validity + "_" + jet_definition.c_str(), parametrization, energy_scale, mass_definition);
-      require_success(validity->initialize(&histograms), "Could not load file-wide jet validity");
+      require_success(validity_histogram->initialize(&histograms), "Could not load file-wide jet validity");
+      validity = std::move(validity_histogram);
     }
-    resolutions = std::make_unique<jet::ResolutionHelper>("CorrectionLibJetUncertainty", jet_definition);
-    require_success(resolutions->initialize(settings, &histograms, mc_type.c_str()), "Could not load nominal jet resolutions");
+    auto resolution_helper = std::make_unique<jet::ResolutionHelper>("CorrectionLibJetUncertainty", jet_definition);
+    require_success(resolution_helper->initialize(settings, &histograms, mc_type.c_str()),
+                    "Could not load nominal jet resolutions");
+    resolutions = std::move(resolution_helper);
 
     std::vector<jet::UncertaintyGroup*> group_pointers;
     for (const auto& group : groups) {
