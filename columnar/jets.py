@@ -45,7 +45,7 @@ if not __package__ and str(CHECKOUT) not in sys.path:
     sys.path.insert(0, str(CHECKOUT))
 
 from columnar.inputs import (
-    COLLECTIONS, LARGE_LABEL, LARGE_OBSERVABLES, P4_FIELDS, R4_TRUTH, R10_TRUTH,
+    COLLECTIONS, LARGE_LABEL, LARGE_OBSERVABLES, P4_FIELDS, R4_TRUTH, R10_TRUTH, SMALL_RHO,
     branch_plan, event_rows, flatten, offsets, optional_event, optional_object,
     pick_feature, read_p4, resolve_branches, sampling_features, track_counts,
 )
@@ -306,7 +306,7 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
         detector_eta = flatten(source[collection, "DetectorEta"], np.float64)
         if prefix == "sr":
             mu, event_vertex = prepared
-            rho = np.asarray(ak.to_numpy(source["Kt4EMPFlowEventShape", "Density"]), dtype=np.float64)
+            rho = np.asarray(ak.to_numpy(source[SMALL_RHO, "Density"]), dtype=np.float64)
             area = flatten(source[collection, "ActiveArea4vec_pt"], np.float64)
             corrected = nodes["small_pileup"].evaluate(
                 *constituent.T, area, rho[rows], mu[rows], event_vertex[rows, 0].astype(np.int64))

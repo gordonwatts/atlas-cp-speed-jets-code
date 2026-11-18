@@ -11,6 +11,8 @@ from uproot.source.futures import TrivialExecutor
 P4_FIELDS = ("pt", "eta", "phi", "m")
 EVENT_KEYS = ("eventNumber", "runNumber", "lumiBlock", "mcChannelNumber")
 COLLECTIONS = {"sr": "AnalysisJets", "lr": "AnalysisLargeRJets"}
+# RhoKey in the active area-00-04-83 small-R nominal recommendation.
+SMALL_RHO = "Kt4EMPFlowNeutEventShape"
 R4_TRUTH = "AntiKt4TruthDressedWZJets"
 R10_TRUTH = "AntiKt10TruthSoftDropBeta100Zcut10Jets"
 LARGE_LABEL = "R10TruthLabel_R21Precision_2022v1"
@@ -99,7 +101,7 @@ def branch_plan(collections, mode, diagnostics=False, stage="final"):
         )
     if "sr" in collections:
         small = COLLECTIONS["sr"]
-        add("Kt4EMPFlowEventShape", "Density")
+        add(SMALL_RHO, "Density")
         add(small, "ActiveArea4vec_pt")
         if stage != "pileup" and stage != "etaJES":
             add(small, "SumPtChargedPFOPt500", "NumTrkPt1000", "TrackWidthPt1000", "EnergyPerSampling")
