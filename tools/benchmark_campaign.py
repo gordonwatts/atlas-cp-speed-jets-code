@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import statistics
 import sys
 import time
@@ -47,6 +48,7 @@ ROOT_LIBRARIES = (
     "libJetCalibTools", "libJetUncertainties", "libAsgTools", "liblwtnn.so",
 )
 ARM_ORDERS = ("ABC", "BAC", "CAB", "BCA")
+FAITHFUL_C_FILES = ("columnar/jets.py", "columnar/inputs.py", "jet_transport.py")
 
 
 class Cohort(str, Enum):
@@ -93,6 +95,35 @@ def schedule() -> list[Job]:
 def sha256(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def faithful_snapshot_sources(result: Path, origin: Path) -> tuple[Path, dict[str, str]]:
+    snapshot = result / "frozen-columnar"
+    if snapshot.is_dir():
+        manifest = dict(reversed(line.split(None, 1)) for line in
+                        (snapshot / "source.sha256").read_text().splitlines())
+        checked = {key: sha256(snapshot / key) for key in FAITHFUL_C_FILES}
+        if checked != manifest:
+            raise ValueError(f"Frozen faithful C source digest changed in {snapshot}")
+        return snapshot, checked
+    directory = origin.parent.parent
+    if origin != directory / FAITHFUL_C_FILES[0]:
+        raise ValueError("Faithful C source must include columnar/jets.py, columnar/inputs.py and jet_transport.py")
+    return snapshot, {key: sha256(directory / key) for key in FAITHFUL_C_FILES}
+
+
+def create_faithful_snapshot(snapshot: Path, original_script: Path, expected: dict[str, str]) -> None:
+    if snapshot.is_dir():
+        return
+    temporary = snapshot.with_name(f".{snapshot.name}.{os.getpid()}")
+    (temporary / "columnar").mkdir(parents=True)
+    directory = original_script.parent.parent
+    for key, digest in expected.items():
+        shutil.copyfile(directory / key, temporary / key)
+        if sha256(temporary / key) != digest:
+            raise ValueError(f"Faithful source changed while freezing {key}")
+    (temporary / "source.sha256").write_text("".join(f"{digest}  {key}\n" for key, digest in expected.items()))
+    temporary.rename(snapshot)
 
 
 def sealed_json(path: Path, value) -> None:
@@ -320,6 +351,7 @@ class Context:
     core: Path
     columnar_python: Path
     columnar_script: Path
+    columnar_sources: dict[Path, str]
     c_provider: Path | None
     c_payload: Path | None
     wheel_members: dict
@@ -330,6 +362,9 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             specification: dict, diagnostic: bool) -> dict:
     output = attempt / "histograms.npz"
     if job.arm == "C":
+        for path, digest in context.columnar_sources.items():
+            if sha256(path) != digest:
+                raise ValueError(f"Columnar source changed before {job.key}: {path}")
         scope = "both" if job.scope == Scope.combined else job.scope.value
         command = [
             str(context.columnar_python), str(context.columnar_script), str(context.input_file),
@@ -585,6 +620,16 @@ def run(
     if cohort == Cohort.production and (columnar_provider or columnar_payload):
         raise typer.BadParameter("Production C loads the executable assets inside its wheel")
     wheel_members = installed_wheel(wheel, cohort)
+    snapshot = None
+    if cohort == Cohort.faithful:
+        snapshot, source_hashes = faithful_snapshot_sources(result, columnar_script)
+        physical_script = snapshot / FAITHFUL_C_FILES[0]
+        columnar_sources = {snapshot / key: digest for key, digest in source_hashes.items()}
+        entrypoint_sha256 = source_hashes[FAITHFUL_C_FILES[0]]
+    else:
+        physical_script = columnar_script
+        entrypoint_sha256 = sha256(physical_script)
+        columnar_sources = {physical_script: entrypoint_sha256}
     wheel_proof = None
     if wheel:
         wheel_proof = wheel.with_name("bundle.json")
@@ -657,7 +702,8 @@ def run(
         "cohort": cohort.value, "cpu": CPU, "thread_limits": THREAD_LIMITS, "release": str(release),
         "guest_node": os.uname().nodename, "guest_release": os.uname().release,
         "original": input_spec, "accepted_observers": proofs,
-        "identity_sha256": {str(path): sha256(path) for path in identity_paths},
+        "identity_sha256": {str(path): (entrypoint_sha256 if path == columnar_script else sha256(path))
+                            for path in identity_paths},
         "wheel_members_sha256": wheel_members, "columnar_matched_read": matched_read,
         "endpoint": {"A": ["CPRun", "histogram"], "B": ["CPRun", "histogram"],
                      "C": ["one direct PHYSLITE histogram pass"]},
@@ -666,8 +712,8 @@ def run(
     }
     context = Context(
         cohort, input_file, source, framework_python, framework_env, overlay_env, columnar_env,
-        libraries, provider, core, columnar_python, columnar_script, columnar_provider,
-        columnar_payload, wheel_members, matched_read,
+        libraries, provider, core, columnar_python, physical_script, columnar_sources,
+        columnar_provider, columnar_payload, wheel_members, matched_read,
     )
 
     with (ROOT / f"results/.benchmark-cpu{CPU}.lock").open("a+") as lock:
@@ -685,11 +731,15 @@ def run(
                 raise ValueError(f"Configuration or artifact identity changed for {result}")
         else:
             sealed_json(campaign, provenance)
+        if snapshot:
+            create_faithful_snapshot(snapshot, columnar_script, source_hashes)
         controllers = result / "controllers"
         controllers.mkdir(exist_ok=True)
         controller = controllers / f"{time.time_ns()}-{os.getpid()}.json"
         sealed_json(controller, {
             "source_sha256": {str(path): sha256(path) for path in controller_sources},
+            "columnar_source_sha256": {str(path): digest for path, digest in columnar_sources.items()},
+            "columnar_entrypoint": str(physical_script),
             "columnar_runtime": {key: columnar_env[key] for key in
                                  ("PATH", "ROOTSYS", "ROOT_INCLUDE_PATH", "LD_LIBRARY_PATH") if key in columnar_env},
         })
