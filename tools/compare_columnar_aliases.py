@@ -46,8 +46,8 @@ def aliases(states):
                 result[leaf("m")] = (leaf("p4m"),)
             result[leaf("pt")] = (leaf("p4pt"),)
             if state == "NOSYS":
-                result[leaf("eta")] = (leaf("p4eta"),)
-                result[leaf("phi")] = (leaf("p4phi"),)
+                result[f"{prefix}_eta"] = (leaf("p4eta"),)
+                result[f"{prefix}_phi"] = (leaf("p4phi"),)
     return result
 
 
