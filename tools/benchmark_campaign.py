@@ -1,4 +1,5 @@
 """Run the matched A/B/C timing rounds using immutable per-job receipts."""
+import ast
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
@@ -8,9 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import statistics
+import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import time
 from typing import Annotated
 import zipfile
@@ -327,7 +331,7 @@ def verify_columnar(job: Job, attempt: Path, receipt: dict, inventory: dict,
         for name, digest in wheel_members["native"].items():
             matches = [path for path in loaded if path.name == name]
             required = job.mode != "stored" or name in {"libstdc++.so.6", "libgcc_s.so.1"}
-            if (required and len(matches) != 1) or any(sha256(path) != digest for path in matches):
+            if len(matches) != int(required) or any(sha256(path) != digest for path in matches):
                 raise ValueError(f"Production wheel runtime differs for {name} in {attempt}")
         compiler, = (path for path in loaded if path.name == "libstdc++.so.6")
         data = compiler.parents[2] / "atlas_jet_demo/data"
@@ -356,11 +360,37 @@ class Context:
     c_payload: Path | None
     wheel_members: dict
     matched_read: bool
+    projections: dict[Scope, dict]
+    projection_stamps: dict[Path, tuple]
+    compact_by_default: bool
+
+
+def check_materialized_payload(attempt: Path, projection: dict | None) -> str:
+    log = (attempt / "columnar.log").read_text()
+    digests = re.findall(r"(?m)^Payload materialized SHA-256: ([0-9a-f]{64})$", log)
+    counts = re.findall(r"(?m)^Payload materialized bytes: (\d+)$", log)
+    if not projection:
+        if digests or counts:
+            raise ValueError(f"Unexpected scoped extraction in {attempt}")
+        return "canonical or stored"
+    if not (digests or counts) and not projection["runtime_identity_log_required"]:
+        return "verified replay of the unchanged installed projector and input bytes"
+    document = projection["document"]
+    if digests != [document["sha256"]] or counts != [str(document["bytes"])]:
+        raise ValueError(f"Timed C materialized different payload bytes in {attempt}")
+    return "SHA-256 and byte count reported by the timed materialization"
 
 
 def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             specification: dict, diagnostic: bool) -> dict:
     output = attempt / "histograms.npz"
+    projection = context.projections.get(job.scope) if job.mode != "stored" else None
+    payload_receipt = None
+    if projection and job.arm in {"B", "C"}:
+        payload_receipt = {
+            "scope": job.scope.value, "sha256": projection["document"]["sha256"],
+            "bytes": projection["document"]["bytes"], "subtrees_sha256": projection["subtrees_sha256"],
+        }
     if job.arm == "C":
         for path, digest in context.columnar_sources.items():
             if sha256(path) != digest:
@@ -377,6 +407,13 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             command.extend(("--states", str(INVENTORY), "--histogram-spec", str(SPECIFICATION)))
             if job.mode != "stored":
                 command.extend(("--provider", str(context.c_provider), "--payload", str(context.c_payload)))
+        elif projection:
+            if not context.compact_by_default:
+                command.append("--compact-payload")
+            for path in projection["shipped_component_sha256"]:
+                path = Path(path)
+                if file_stamp(path) != context.projection_stamps[path]:
+                    raise ValueError(f"Shipped payload input changed before {job.key}: {path}")
         environment = dict(context.columnar_env)
         if diagnostic and context.cohort == Cohort.production:
             environment["ATLAS_JET_LIBRARY_AUDIT"] = str(attempt / "wheel-runtime.json")
@@ -393,6 +430,17 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             context.core, context.c_provider, context.wheel_members,
         )
         counters["matched_read"] = use_matched_read
+        if context.cohort == Cohort.production:
+            reported = check_materialized_payload(attempt, projection)
+            if projection:
+                for path in projection["shipped_component_sha256"]:
+                    path = Path(path)
+                    if file_stamp(path) != context.projection_stamps[path]:
+                        raise ValueError(f"Shipped payload input changed during {job.key}: {path}")
+                payload_receipt["loader"] = "shipped on-demand extraction inside timed C"
+                payload_receipt["identity_evidence"] = reported
+            elif job.mode == "stored":
+                payload_receipt = {"loader": "stored workflow without numerical assets"}
         if use_matched_read and not counters["input_branch_sha256"]:
             raise ValueError(f"Matched-read execution did not report actual input branch identity in {attempt}")
         times = {"total": leg["wall_s"]}
@@ -407,9 +455,24 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
         ]
         if job.mode == "nominal":
             command.append("--no-systematics")
-        environment = context.framework_env if job.arm == "A" else context.overlay_env
+        bypass_overlay = context.cohort == Cohort.production and job.mode == "stored"
+        environment = context.framework_env if job.arm == "A" or bypass_overlay else context.overlay_env
+        if job.arm == "B" and projection:
+            selected = Path(projection["document"]["path"])
+            if file_stamp(selected) != context.projection_stamps[selected]:
+                raise ValueError(f"Prebuilt scoped payload changed before {job.key}: {selected}")
+            environment = {**environment, "JETS_PAYLOAD": str(selected)}
+            payload_receipt.update(path=str(selected), loader="framework JETS_PAYLOAD")
+            sealed_json(attempt / "framework-payload.json", payload_receipt)
         frame = run_leg(command, environment, attempt, "framework")
-        verify_framework(job, attempt, frame, inventory, context.libraries, context.b_provider, context.core)
+        checked_job = Job(job.round, job.scope, job.mode, "A", job.anchor) if bypass_overlay else job
+        verify_framework(checked_job, attempt, frame, inventory, context.libraries, context.b_provider, context.core)
+        if job.arm == "B" and projection and file_stamp(selected) != context.projection_stamps[selected]:
+            raise ValueError(f"Prebuilt scoped payload changed during {job.key}: {selected}")
+        if job.arm == "B" and bypass_overlay:
+            if any(Path(x).name in {"libjets.so", "libcorrectionlib.so"} for x in frame["libraries"]):
+                raise ValueError(f"Stored B loaded numerical assets in {attempt}")
+            payload_receipt = {"loader": "stock stored workflow without numerical assets"}
         hist = run_leg(
             [str(HISTOGRAM_PYTHON), str(REFERENCE / "workflow.py"), "histogram",
              str(attempt / "reference.root"), str(INVENTORY), str(SPECIFICATION),
@@ -431,6 +494,7 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
         "wall_s": times,
         "cpu_accounting": accounting,
         "input_visit_counters": counters,
+        **({"payload_selection": payload_receipt} if payload_receipt else {}),
     }
 
 
@@ -542,6 +606,282 @@ def installed_wheel(wheel: Path | None, cohort: Cohort) -> dict:
     return {"native": members, "data": data}
 
 
+def identity(path: Path) -> dict:
+    return {"bytes": path.stat().st_size, "sha256": sha256(path)}
+
+
+def file_stamp(path: Path) -> tuple:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def script_bool_default(script: Path, name: str) -> bool | None:
+    entry, = (node for node in ast.parse(script.read_text()).body if isinstance(node, ast.FunctionDef)
+              and node.name == "main")
+    arguments = entry.args.posonlyargs + entry.args.args
+    defaults = zip(arguments[-len(entry.args.defaults):], entry.args.defaults)
+    for argument, default in (*defaults, *zip(entry.args.kwonlyargs, entry.args.kw_defaults, strict=True)):
+        if argument.arg == name:
+            value = ast.literal_eval(default)
+            if not isinstance(value, bool):
+                raise ValueError(f"The shipped {name} default must be a boolean")
+            return value
+    return None
+
+
+def projection_node_hashes(canonical: Path, layout: dict, manifest: dict, scope: Scope,
+                           correction_names: list[str]) -> dict:
+    spans = layout["scopes"][scope.value]["spans"]
+    if correction_names != [name for name in manifest["canonical_order"] if name in correction_names]:
+        raise ValueError(f"Noncanonical correction order for {scope.value}")
+    hashes = {}
+    with canonical.open("rb") as source:
+        for name, (start, stop) in zip(correction_names, spans, strict=True):
+            entry = manifest["nodes"][name]
+            if stop - start != entry["bytes"]:
+                raise ValueError(f"Index byte dimensions differ for {name}")
+            digest = hashlib.sha256()
+            source.seek(start)
+            remaining = stop - start
+            while remaining:
+                block = source.read(min(remaining, 1024 * 1024))
+                if not block:
+                    raise ValueError(f"Canonical document ended inside {name}")
+                digest.update(block)
+                remaining -= len(block)
+            if digest.hexdigest() != entry["sha256"]:
+                raise ValueError(f"Canonical raw correction bytes differ for {name}")
+            hashes[name] = digest.hexdigest()
+    return hashes
+
+
+def compare_scoped_ntuple(stock: Path, candidate: Path, events: int) -> dict:
+    """Compare every public persisted branch of the isolated stock and B endpoints."""
+    from compare_observer import difference
+
+    proofs = {}
+    mismatches = {}
+    with open_root(stock / "reference.root") as a_file, open_root(candidate / "reference.root") as b_file:
+        a, b = a_file["analysis"], b_file["analysis"]
+        if a.num_entries != events or b.num_entries != events:
+            raise ValueError("Scoped stock and B ntuples do not have the requested entry interval")
+        keys = sorted(a.keys())
+        if keys != sorted(b.keys()) or not keys:
+            raise ValueError(f"Scoped stock/B persisted keys differ: {sorted(set(keys) ^ set(b.keys()))[:12]}")
+        # Production trees have no explicit event/jet ID fields; their vector
+        # lengths and payload are checked in the stored event-entry order.
+        unused_identity = np.zeros(events, dtype=np.int64)
+        for start in range(0, len(keys), 24):
+            packet = keys[start:start + 24]
+            left, right = a.arrays(packet, how=dict), b.arrays(packet, how=dict)
+            for key in packet:
+                if a[key].typename != b[key].typename:
+                    raise ValueError(f"Scoped persisted ROOT branch type differs for {key}")
+                delta, proof = difference(key, left[key], right[key], unused_identity, unused_identity)
+                proofs[key] = proof
+                if delta is not None:
+                    for example in delta["examples"]:
+                        example.pop("run")
+                        example.pop("event")
+                    mismatches[key] = delta
+    with (open_root(stock / "hist-reference.root") as a_file,
+          open_root(candidate / "hist-reference.root") as b_file):
+        labels = {}
+        for key in ("systematicsList", "systematicsListOnlyWeights"):
+            left = a_file[key].axis().labels() if key in a_file else None
+            right = b_file[key].axis().labels() if key in b_file else None
+            if left != right:
+                raise ValueError(f"Scoped systematic order differs in {key}")
+            labels[key] = left
+    return {
+        "stock_ntuple": {"path": str(stock / "reference.root"), **identity(stock / "reference.root")},
+        "framework_ntuple": {"path": str(candidate / "reference.root"), **identity(candidate / "reference.root")},
+        "stock_counters": {"path": str(stock / "hist-reference.root"), **identity(stock / "hist-reference.root")},
+        "framework_counters": {"path": str(candidate / "hist-reference.root"), **identity(candidate / "hist-reference.root")},
+        "events": events, "keys": keys, "branches": len(keys), "systematic_labels": labels,
+        "checked_values": sum(row["items"] for row in proofs.values()),
+        "checked_value_bytes": sum(row["bytes"] for row in proofs.values()),
+        "exact": not mismatches, "differences": mismatches, "proofs": proofs,
+    }
+
+
+def scoped_framework_proof(path: Path, scope: Scope, selected: Path, source: Path, provider: Path,
+                           core: Path, libraries: dict, inventory: dict) -> dict:
+    recovery = json.loads(path.read_text())
+    record_path = Path(recovery["pilot_provenance"]["path"]).resolve(strict=True)
+    if recovery["pilot_provenance"]["sha256"] != sha256(record_path):
+        raise ValueError(f"Original B pilot provenance differs from its exact endpoint receipt: {path}")
+    record = json.loads(record_path.read_text())
+    pilot = record_path.parent
+    events = record["events"]
+    if (record["path"] != "B" or record["scope_collections"] != scope.value
+            or record["histogram_spec_sha256"] != sha256(SPECIFICATION)
+            or not 0 < events <= EVENTS or Path(record["input"]).resolve() != source.resolve()
+            or not recovery["endpoint_exact"] or recovery["process_audit_reclassified"]
+            or recovery["scope"] != scope.value or recovery["events"] != events
+            or Path(recovery["input"]).resolve() != source.resolve()):
+        raise ValueError(f"Scoped B receipt does not cover {scope.value} and the frozen input: {path}")
+    expected_artifacts = (selected, provider, core, *libraries.values())
+    for artifact in expected_artifacts:
+        if record["artifact_sha256"].get(str(artifact)) != sha256(artifact):
+            raise ValueError(f"Scoped B receipt does not identify {artifact}")
+    stock = Path(record["stock"]).resolve(strict=True)
+    stock_record = json.loads((stock / "provenance.json").read_text())
+    if (stock_record["events"] != events or stock_record["scope_collections"] != scope.value
+            or Path(stock_record["input"]).resolve() != source.resolve()):
+        raise ValueError(f"Scoped B stock receipt differs from the selected interval: {stock}")
+    exact = {}
+    for mode in MODES:
+        candidate = pilot / f"01-{mode}"
+        frame_path = candidate / "framework.json"
+        checked = recovery["modes"][mode]
+        if checked["framework_receipt"] != {"path": str(frame_path), **identity(frame_path)}:
+            raise ValueError(f"Scoped B process receipt differs for {scope.value}/{mode}")
+        frame = json.loads(frame_path.read_text())
+        if frame["exit"] != 0 or frame["threads_seen"] != [1] or frame["cpus_seen"] != [str(CPU)]:
+            raise ValueError(f"Scoped B execution proof is incomplete for {scope.value}/{mode}")
+        confirm_scope(candidate, mode, scope, inventory, events)
+        if mode != "stored":
+            for library in (provider, core, libraries["JetUncertaintiesLib"], libraries["JetsCorrectionRuntime"]):
+                verified_library(frame, library, True)
+        actual = Path(checked["endpoint"]["path"])
+        expected = stock / f"01-{mode}/histograms.npz"
+        if checked["endpoint"] != {"path": str(actual), **identity(actual)} or checked["stock_endpoint"] != {
+            "path": str(expected), **identity(expected),
+        }:
+            raise ValueError(f"Scoped B histogram input differs for {scope.value}/{mode}")
+        exact_archive(actual, expected)
+        exact[mode] = sha256(actual)
+    comparison_file = Path(recovery["full_ntuple_comparison"]["path"])
+    if recovery["full_ntuple_comparison"] != {"path": str(comparison_file), **identity(comparison_file)}:
+        raise ValueError(f"Scoped B all-branch comparison moved since acceptance: {comparison_file}")
+    comparison = json.loads(comparison_file.read_text())
+    if not comparison["exact"] or comparison["events"] != events or not comparison["branches"]:
+        raise ValueError(f"Scoped B is missing its exact full persisted-branch comparison: {comparison_file}")
+    for role, directory in (("stock", stock), ("framework", pilot)):
+        for record_key, basename in (("ntuple", "reference.root"), ("counters", "hist-reference.root")):
+            observed = directory / "01-full" / basename
+            if comparison[f"{role}_{record_key}"] != {"path": str(observed), **identity(observed)}:
+                raise ValueError(f"Scoped B {role} evidence changed: {observed}")
+    return {"path": str(path), "sha256": sha256(path), "events": events, "histograms": exact,
+            "full_branches": comparison["branches"], "full_values": comparison["checked_values"]}
+
+
+def scoped_columnar_proof(path: Path, shipped: Path, scope: Scope, selected: Path,
+                          authority: Path, source: Path, source_uuid: str, verified_provider: set,
+                          verified_core: set, wheel: Path, script: Path) -> dict:
+    proof = json.loads(path.read_text())
+    if (not proof["passed"] or proof["scope"] != scope.value or proof["mode"] != "full"
+            or proof["stage_limit"] != "final" or not 0 < proof["entries_compared"] <= EVENTS
+            or Path(proof["authority"]).resolve() != authority
+            or Path(proof["source_phySLITE"]).resolve() != source.resolve() or proof["source_file_uuid"] != source_uuid
+            or sha256(Path(proof["payload"])) != sha256(selected)
+            or sha256(Path(proof["provider"])) not in verified_provider
+            or sha256(Path(proof["runtime"]["core"])) not in verified_core
+            or proof.get("reuse_nominal_nnjvt_update", False)
+            != bool(script_bool_default(script, "reuse_nominal_nnjvt_update"))):
+        raise ValueError(f"Scoped C object receipt does not cover the actual projected bytes: {path}")
+    check = json.loads(shipped.read_text())
+    installation = check["installation"]
+    if (check["scope"] != scope.value or Path(check["original"]).resolve() != source.resolve()
+            or not 0 < check["events"] <= EVENTS or not check["all_histogram_fields_exact"]
+            or not check["matched_nominal_nosys_exact"]
+            or installation["wheel_sha256"] != sha256(wheel) or installation["script_sha256"] != sha256(script)):
+        raise ValueError(f"Shipped scoped C acceptance differs from the timed artifact: {shipped}")
+    stock = Path(check["stock_full_histogram"]["path"])
+    if sha256(stock) != check["stock_full_histogram"]["sha256"]:
+        raise ValueError(f"Stock histogram moved since shipped C acceptance: {stock}")
+    for name in ("pip-indexed-full", "pip-indexed-nominal", "uv-indexed-full"):
+        if (shipped.parent / f"{name}.exit").read_text().strip() != "0":
+            raise ValueError(f"Shipped scoped C did not complete {name}")
+        command = json.loads((shipped.parent / f"{name}.argv.json").read_text())
+        if "--compact-payload" not in command or "--payload" in command:
+            raise ValueError(f"Shipped C test did not exercise on-demand projection: {name}")
+    exact_archive(shipped.parent / "pip-indexed-full.npz", stock)
+    exact_archive(shipped.parent / "uv-indexed-full.npz", stock)
+    check_pair(shipped.parent / "pip-indexed-nominal.npz", stock)
+    return {"objects": {"path": str(path), "sha256": sha256(path), "events": proof["entries_compared"]},
+            "shipped": {"path": str(shipped), "sha256": sha256(shipped), "events": check["events"]}}
+
+
+def verified_projections(partition: Path, acceptance: Path, scopes: set[Scope], canonical: Path,
+                         wheel: Path, bundle: dict, script: Path, interpreter: Path, source: Path,
+                         source_uuid: str, authority: Path, provider: Path, core: Path,
+                         libraries: dict, wheel_members: dict, inventory: dict) -> dict[Scope, dict]:
+    manifest_path = partition / "manifest.json"
+    index = partition / "payload-index.json"
+    manifest = json.loads(manifest_path.read_text())
+    layout = json.loads(index.read_text())
+    combined = identity(canonical)
+    if (not manifest["raw_node_identity_verified"] or layout.get("format") != 1
+            or layout["canonical"] != combined or any(manifest["canonical"][k] != v for k, v in combined.items())
+            or bundle.get("scope_index") != identity(index)):
+        raise ValueError("The partition and shipped index do not describe the verified combined payload")
+
+    directory = Path(subprocess.check_output(
+        [str(interpreter), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        env=clean_environment(), text=True,
+    ).strip()) / "atlas_jet_demo"
+    installed = directory / "data"
+    projector = directory / "payload_ranges.py"
+    installed_members = {"atlas_jet_demo/data/payload-index.json": installed / "payload-index.json",
+                         "atlas_jet_demo/payload_ranges.py": projector}
+    with zipfile.ZipFile(wheel) as archive:
+        for name, path in installed_members.items():
+            if hashlib.sha256(archive.read(name)).hexdigest() != sha256(path):
+                raise ValueError(f"Installed compact member differs from the wheel: {path}")
+    revision = bundle["git_commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("The shipped projector needs an exact committed source revision")
+    committed = subprocess.check_output(
+        ["git", "-C", str(ROOT), "show", f"{revision}:exporters/payload_ranges.py"]
+    )
+    if (identity(projector) != bundle.get("scope_projector") or committed != projector.read_bytes()
+            or identity(installed / "payload-index.json") != identity(index)
+            or identity(installed / "jets.json") != combined):
+        raise ValueError("The accepted canonical payload, index, or committed projector differs from production")
+    project = runpy.run_path(str(projector))["materialize"]
+    supplied = json.loads(acceptance.read_text())
+    if set(supplied) != {scope.value for scope in scopes}:
+        raise ValueError("Provide B, direct C and shipped C proofs for every selected scope")
+    results = {}
+    for scope in sorted(scopes, key=lambda x: x.value):
+        entry = supplied[scope.value]
+        relative = manifest["native_load_paths"][scope.value]
+        target = (partition / relative).resolve(strict=True)
+        if not target.is_relative_to(partition):
+            raise ValueError(f"Scoped B payload escapes its sealed partition: {target}")
+        declared = manifest["artifacts"][relative]
+        actual = identity(target)
+        expected = layout["scopes"][scope.value]
+        if any(declared[key] != value or expected[key] != value for key, value in actual.items()):
+            raise ValueError(f"Actual scoped document differs from the index and manifest: {target}")
+        node_hashes = projection_node_hashes(canonical, layout, manifest, scope, declared["corrections"])
+        with TemporaryDirectory(prefix="atlas-jet-verified-") as scratch:
+            reconstructed = Path(scratch) / "jets.json"
+            project(installed / "jets.json", installed / "payload-index.json", scope.value, reconstructed)
+            if identity(reconstructed) != actual:
+                raise ValueError(f"Verified shipped code reconstructed different bytes for {scope.value}")
+        evidence = {name: (acceptance.parent / entry[name]).resolve(strict=True)
+                    for name in ("b_recovery", "c_objects", "c_shipped")}
+        results[scope] = {
+            "document": {"path": str(target), **actual},
+            "subtrees_sha256": node_hashes,
+            "canonical": combined,
+            "partition_manifest": {"path": str(manifest_path), **identity(manifest_path)},
+            "index": {"path": str(index), **identity(index)},
+            "shipped_component_sha256": {str(path): sha256(path) for path in (*installed_members.values(), installed / "jets.json")},
+            "runtime_identity_log_required": "Payload materialized SHA-256:" in script.read_text(),
+            "B": scoped_framework_proof(evidence["b_recovery"], scope, target, source, provider, core, libraries, inventory),
+            "C": scoped_columnar_proof(
+                evidence["c_objects"], evidence["c_shipped"], scope, target, authority, source, source_uuid,
+                {sha256(provider), wheel_members["native"]["libjets.so"]},
+                {sha256(core), wheel_members["native"]["libcorrectionlib.so"]}, wheel, script,
+            ),
+        }
+    return results
+
+
 def verify_acceptance(b: Path | None, c: Path | None, diagnostic: bool, overlay: Path,
                       provider: Path, payload: Path, core: Path) -> dict:
     proofs = {}
@@ -570,6 +910,72 @@ def verify_acceptance(b: Path | None, c: Path | None, diagnostic: bool, overlay:
 
 
 @APP.command()
+def recover_b_pilot(pilot: Path, result: Path) -> None:
+    """Reconstruct the histogram endpoint from a saved, successful B job."""
+    pilot = pilot.resolve(strict=True)
+    target = result.resolve()
+    provenance = pilot / "provenance.json"
+    record = json.loads(provenance.read_text())
+    if record["path"] != "B" or not record["pilot"]:
+        raise ValueError("Recovery requires an existing Path B pilot")
+    scope = Scope(record["scope_collections"])
+    inventory = json.loads(INVENTORY.read_text())
+    events = record["events"]
+    stock = Path(record["stock"]).resolve(strict=True)
+    stock_record = json.loads((stock / "provenance.json").read_text())
+    if (stock_record["events"], stock_record["scope_collections"], stock_record["input"]) != (
+        events, scope.value, record["input"],
+    ):
+        raise ValueError("Stock and B pilots do not share the same scope and event interval")
+    frames = {}
+    for mode in MODES:
+        candidate = pilot / f"01-{mode}"
+        frame = candidate / "framework.json"
+        original = json.loads(frame.read_text())
+        if original["exit"] != 0:
+            raise ValueError(f"Failed framework process output in {candidate}")
+        confirm_scope(candidate, mode, scope, inventory, events)
+        frames[mode] = {
+            "framework_receipt": {"path": str(frame), **identity(frame)},
+            "framework_log": {"path": str(candidate / "framework.log"), **identity(candidate / "framework.log")},
+            "ntuple": {"path": str(candidate / "reference.root"), **identity(candidate / "reference.root")},
+            "systematic_counters": {"path": str(candidate / "hist-reference.root"), **identity(candidate / "hist-reference.root")},
+            "recorded_descendants": original["descendant_observations"],
+            "recorded_threads": original["threads_seen"],
+            "recorded_cpu": original["cpus_seen"],
+        }
+    target.mkdir()
+    ntuple_path = target / "full-ntuple.json"
+    ntuple = compare_scoped_ntuple(stock / "01-full", pilot / "01-full", events)
+    sealed_json(ntuple_path, ntuple)
+    if not ntuple["exact"]:
+        raise ValueError(f"Scoped B persisted branches differ from stock: {ntuple_path}")
+    for mode in MODES:
+        candidate = pilot / f"01-{mode}"
+        recovered = target / f"{mode}.npz"
+        if (candidate / "histograms.npz").is_file():
+            shutil.copyfile(candidate / "histograms.npz", recovered)
+        else:
+            subprocess.run([
+                str(HISTOGRAM_PYTHON), str(REFERENCE / "workflow.py"), "histogram",
+                str(candidate / "reference.root"), str(INVENTORY), str(SPECIFICATION),
+                str(recovered), mode, "--scope", scope.value,
+            ], env=clean_environment(), check=True)
+        reference = stock / f"01-{mode}/histograms.npz"
+        exact_archive(recovered, reference)
+        frames[mode]["endpoint"] = {"path": str(recovered), **identity(recovered)}
+        frames[mode]["stock_endpoint"] = {"path": str(reference), **identity(reference)}
+    check_pair(target / "nominal.npz", target / "full.npz")
+    sealed_json(target / "recovery.json", {
+        "pilot_provenance": {"path": str(provenance), **identity(provenance)},
+        "scope": scope.value, "events": events, "input": record["input"], "endpoint_exact": True,
+        "classification": "read-only physics recovery, excluded from timing",
+        "process_audit_reclassified": False, "modes": frames,
+        "full_ntuple_comparison": {"path": str(ntuple_path), **identity(ntuple_path)},
+    })
+
+
+@APP.command()
 def plan() -> None:
     """Show the cross-path schedule, including independent stock drift anchors."""
     typer.echo(json.dumps([job.details() for job in schedule()], indent=2))
@@ -593,6 +999,9 @@ def run(
     columnar_payload: Annotated[Path | None, typer.Option()] = None,
     jobs: Annotated[int | None, typer.Option(min=1, help="Stop after this many new jobs")] = None,
     matched_read: Annotated[bool, typer.Option(help="Match nominal/full columnar branch requests")] = False,
+    compact_scope: Annotated[list[Scope] | None, typer.Option(help="Project small or large production payloads")] = None,
+    payload_partition: Annotated[Path | None, typer.Option(help="Verified canonical partition and byte index")] = None,
+    scoped_acceptance: Annotated[Path | None, typer.Option(help="JSON with b_recovery, c_objects and c_shipped per scope")] = None,
     diagnostic: Annotated[bool, typer.Option(help="Record visits without including them in timed cohorts")] = False,
 ) -> None:
     """Run or resume one exact full-file cohort on the reserved CPU."""
@@ -630,6 +1039,24 @@ def run(
         physical_script = columnar_script
         entrypoint_sha256 = sha256(physical_script)
         columnar_sources = {physical_script: entrypoint_sha256}
+    scopes = set(compact_scope or ())
+    if Scope.combined in scopes:
+        raise typer.BadParameter("Combined calibration uses the canonical document")
+    compact_by_default = False
+    if cohort == Cohort.production:
+        default = script_bool_default(physical_script, "compact_payload")
+        if scopes and default is None:
+            raise typer.BadParameter("The shipped script does not expose compact payload loading")
+        if default is True:
+            defaults = {Scope.small, Scope.large}
+            if scopes and scopes != defaults:
+                raise typer.BadParameter("The shipped script defaults to both single-collection projections")
+            scopes = defaults
+            compact_by_default = True
+    if scopes and cohort != Cohort.production:
+        raise typer.BadParameter("Scoped payload production requires the shipped wheel")
+    if bool(scopes) != bool(payload_partition) or bool(scopes) != bool(scoped_acceptance):
+        raise typer.BadParameter("Selected projections require a partition and per-scope acceptance manifest")
     wheel_proof = None
     if wheel:
         wheel_proof = wheel.with_name("bundle.json")
@@ -687,6 +1114,23 @@ def run(
 
     inventory = json.loads(INVENTORY.read_text())
     specification = json.loads(SPECIFICATION.read_text())
+    projections = {}
+    projection_stamps = {}
+    if scopes:
+        projections = verified_projections(
+            payload_partition.resolve(strict=True), scoped_acceptance.resolve(strict=True), scopes,
+            payload, wheel, bundle, physical_script, columnar_python, input_file, source["source_file_uuid"],
+            independent_stock, provider, core, libraries, wheel_members, inventory,
+        )
+        for projection in projections.values():
+            selected = projection["document"]
+            verified_paths = {selected["path"]: selected["sha256"], **projection["shipped_component_sha256"]}
+            for name, digest in verified_paths.items():
+                path = Path(name)
+                stamp = file_stamp(path)
+                if sha256(path) != digest or file_stamp(path) != stamp:
+                    raise ValueError(f"Scoped payload input changed during preflight: {path}")
+                projection_stamps[path] = stamp
     controller_sources = (
         ROOT / "tools/benchmark_campaign.py", REFERENCE / "benchmark.py", ROOT / "framework/bench_path_b.py",
     )
@@ -710,10 +1154,15 @@ def run(
         "endpoint_clock": "monotonic wall including startup and output serialization",
         "schedule": [job.details() for job in scheduled],
     }
+    if projections:
+        provenance["projected_payloads"] = {scope.value: receipt for scope, receipt in projections.items()}
+        provenance["compact_by_default"] = compact_by_default
+        provenance["scoped_acceptance_sha256"] = sha256(scoped_acceptance)
     context = Context(
         cohort, input_file, source, framework_python, framework_env, overlay_env, columnar_env,
         libraries, provider, core, columnar_python, physical_script, columnar_sources,
-        columnar_provider, columnar_payload, wheel_members, matched_read,
+        columnar_provider, columnar_payload, wheel_members, matched_read, projections, projection_stamps,
+        compact_by_default,
     )
 
     with (ROOT / f"results/.benchmark-cpu{CPU}.lock").open("a+") as lock:
