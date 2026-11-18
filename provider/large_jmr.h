@@ -1,5 +1,6 @@
 #pragma once
 
+#include "jet_histogram.h"
 #include "truth_context.h"
 
 #include <optional>
@@ -7,7 +8,6 @@
 #include <string_view>
 #include <vector>
 
-class TH1;
 
 namespace correction {
 class PluginRegistry;
@@ -37,7 +37,7 @@ struct LargeJmrSettings {
 struct LargeJmrVariation {
   JmrBinning binning;
   std::string_view topology_filter;
-  const TH1& histogram;
+  const CalibrationHistogram& histogram;
   float parameter;
 };
 
@@ -50,7 +50,7 @@ struct LargeJmrResult {
 const P4* nearest_truth_jet(const P4& reco, TruthJetRange truth, double maximum_delta_r);
 
 LargeJmrResult apply_large_jmr(const P4& reco, std::optional<int> truth_label,
-                               TruthJetRange truth, const TH1& response,
+                               TruthJetRange truth, const CalibrationHistogram& response,
                                const LargeJmrVariation& variation,
                                const LargeJmrSettings& settings);
 

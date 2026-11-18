@@ -1,10 +1,9 @@
 // Active spline-response prescription from ATLAS JetCalibTools, EtaJESCorrection.
 // Copyright (C) 2002-2026 CERN for the benefit of the ATLAS collaboration.
 #include "eta_jes.h"
-#include "histogram.h"
+#include "jet_histogram.h"
 #include "jet_common.h"
 
-#include <TLorentzVector.h>
 #include <correction_plugin.h>
 
 #include <algorithm>
@@ -29,7 +28,7 @@ std::vector<double> read_numbers(const Value& values) {
 }
 
 struct EtaBin {
-  std::unique_ptr<TH1> response;
+  std::unique_ptr<jets::CalibrationHistogram> response;
   std::vector<double> direction;
   double freeze_at, cutoff, cutoff_response, slope;
 };
@@ -62,7 +61,7 @@ public:
       const auto& row = rows[static_cast<unsigned>(i)];
       if (!row.IsObject() || !row.HasMember("response") || !row.HasMember("eta_coefficients") ||
           !row.HasMember("freeze_at") || !row["freeze_at"].IsNumber()) throw std::invalid_argument("EtaJES table");
-      auto hist = jets::restore_histogram(row["response"]);
+      auto hist = jets::restore_calibration_histogram(row["response"]);
       auto direction = read_numbers(row["eta_coefficients"]);
       if (hist->GetDimension()!=1 || direction.empty()) throw std::invalid_argument("EtaJES dimensions");
       const double cutoff = minimum_pt(edges_[i]) * std::cosh(edges_[i]);
@@ -98,7 +97,7 @@ public:
     for (size_t k = 0; k < bin.direction.size(); ++k)
       offset += bin.direction[k]*std::pow(std::log(corrected_gev), static_cast<int>(k));
     const double direction = scaled.Eta() + (-offset);
-    TLorentzVector cartesian;
+    jets::CartesianP4 cartesian;
     cartesian.SetPtEtaPhiM(scaled.P()/std::cosh(direction), direction, scaled.Phi(), scaled.M());
     scaled.SetPxPyPzE(cartesian.Px(), cartesian.Py(), cartesian.Pz(), cartesian.E());
     return jets::stored_p4(scaled);

@@ -1,6 +1,8 @@
 #include "jet_uncertainty.h"
 
 #include "histogram.h"
+#include "jet_common.h"
+#include "jet_smearing.h"
 #include "uncertainty_components.h"
 
 #include <AthContainers/AuxElement.h>
@@ -12,7 +14,6 @@
 #include <TDirectory.h>
 #include <TEnv.h>
 #include <TMemFile.h>
-#include <TRandom3.h>
 #include <correction_plugin.h>
 #include <rapidjson/document.h>
 #include <xAODEventInfo/EventInfo.h>
@@ -56,22 +57,6 @@ void write_histograms(TMemFile& file, const Json& histograms) {
   }
 }
 
-struct ResolutionRandom {
-  long long user_seed;
-  double mc_multiplier;
-  double pseudo_data_multiplier;
-  long long mc_fallback;
-  long long pseudo_data_fallback;
-
-  long long seed(double phi, bool pseudo_data) const {
-    // JetUncertaintiesTool.cxx:2507-2527. Conversion truncates toward zero.
-    long long value = user_seed != 0
-        ? user_seed * 1.00e+5 * std::abs(phi)
-        : (pseudo_data ? pseudo_data_multiplier : mc_multiplier) * std::abs(phi);
-    return value == 0 ? (pseudo_data ? pseudo_data_fallback : mc_fallback) : value;
-  }
-};
-
 double nominal_resolution(const jet::ResolutionHelper& resolutions, const xAOD::Jet& jet,
                           Scale type, jet::JetTopology::TypeEnum topology,
                           bool read_mc, float energy_scale) {
@@ -86,29 +71,11 @@ double nominal_resolution(const jet::ResolutionHelper& resolutions, const xAOD::
 
 double resolution_factor(const jet::ResolutionHelper& resolutions, const xAOD::Jet& calibrated,
                          Scale scale, jet::JetTopology::TypeEnum topology, double variation,
-                         bool pseudo_data, float energy_scale, const ResolutionRandom& random) {
-  const bool only_mc = resolutions.smearOnlyMC();
-  if (variation == 0.0 || (pseudo_data && (only_mc || variation > 0.0)) ||
-      (!pseudo_data && variation < 0.0 && !only_mc)) {
-    return 1.0;
-  }
-  const double sigma_mc = nominal_resolution(resolutions, calibrated, scale, topology, true, energy_scale);
-  const double sigma_data = nominal_resolution(resolutions, calibrated, scale, topology, false, energy_scale);
-  const double sigma = std::max(sigma_mc, sigma_data);
-  const double relative_factor = jet::CompScaleVar::isRelResolutionType(scale) ? sigma : 1.0;
-  const double width = std::sqrt(std::pow(sigma + std::abs(variation) * relative_factor, 2) -
-                                 std::pow(sigma, 2));
-  if (random.user_seed == 1) return 0.0;
-
-  // The release reseeds before every eligible draw. Each thread can reuse its
-  // generator storage since the seed resets the stream for the current jet.
-  thread_local TRandom3 generator;
-  generator.SetSeed(random.seed(calibrated.phi(), pseudo_data));
-  double factor;
-  do {
-    factor = generator.Gaus(1.0, width);
-  } while (factor < 0.0);
-  return factor;
+                         bool pseudo_data, float energy_scale, const jets::ResolutionRandom& random) {
+  return jets::resolution_factor(calibrated.phi(), variation, pseudo_data, resolutions.smearOnlyMC(),
+      jet::CompScaleVar::isRelResolutionType(scale), random, [&](bool read_mc) {
+        return nominal_resolution(resolutions, calibrated, scale, topology, read_mc, energy_scale);
+      });
 }
 
 void set_jet_inputs(xAOD::Jet& jet, const jets::JetUncertaintyInput& input, std::optional<bool> is_bjet) {
@@ -135,7 +102,7 @@ void set_jet_inputs(xAOD::Jet& jet, const jets::JetUncertaintyInput& input, std:
 }
 
 void update_coordinates(xAOD::Jet& jet, double pt_factor, double mass_factor) {
-  jet.setJetP4(xAOD::JetFourMom_t(pt_factor * jet.pt(), jet.eta(), jet.phi(), mass_factor * jet.m()));
+  jet.setJetP4(jets::relative_pt_mass(jet.pt(), jet.eta(), jet.phi(), jet.m(), pt_factor, mass_factor));
 }
 
 bool is_supported_scale(Scale scale) {

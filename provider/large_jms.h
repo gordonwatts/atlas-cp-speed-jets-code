@@ -2,8 +2,7 @@
 #define ATLAS_JETS_LARGE_JMS_H
 
 #include "jet_common.h"
-
-class TH3;
+#include "jet_histogram.h"
 
 namespace correction {
 class PluginRegistry;
@@ -21,7 +20,7 @@ struct LargeJmsSettings {
 // The input is the float-written EtaJES scale. The result is the float-written
 // JMS scale. The lookup uses the original float DetectorEta decoration.
 P4 apply_large_jms(const P4& eta_jes, float detector_eta,
-                   const TH3& response, const LargeJmsSettings& settings);
+                   const CalibrationHistogram& response, const LargeJmsSettings& settings);
 
 }  // namespace jets
 

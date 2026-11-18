@@ -1,12 +1,5 @@
 #include "large_jmr.h"
 
-#include "histogram.h"
-
-#include <JetUncertainties/JetHelpers.h>
-#include <TAxis.h>
-#include <TH1.h>
-#include <TLorentzVector.h>
-#include <TMath.h>
 #include <correction_plugin.h>
 #include <rapidjson/document.h>
 
@@ -69,16 +62,16 @@ const P4* nearest_truth_jet(const P4& reco, TruthJetRange truth, double maximum_
 
 namespace {
 
-double interpolate_in_range(const TH1& histogram, double x, double y) {
+double interpolate_in_range(const jets::CalibrationHistogram& histogram, double x, double y) {
   const int xbin = histogram.GetXaxis()->FindFixBin(x);
   const int ybin = histogram.GetYaxis()->FindFixBin(y);
   if (xbin < 1 || xbin > histogram.GetNbinsX() || ybin < 1 || ybin > histogram.GetNbinsY()) {
     return 0.0;
   }
-  return JetHelpers::Interpolate(&histogram, x, y);
+  return jets::jet_interpolate(histogram, x, y);
 }
 
-double clamp_inside(double value, const TAxis& axis, double offset) {
+double clamp_inside(double value, const jets::CalibrationAxis& axis, double offset) {
   const double low = axis.GetBinLowEdge(1);
   const double high = axis.GetBinLowEdge(axis.GetNbins() + 1);
   // The original compares each limit against the original coordinate.
@@ -89,7 +82,7 @@ double clamp_inside(double value, const TAxis& axis, double offset) {
 
 double jmr_uncertainty(const jets::P4& reco, const jets::LargeJmrVariation& variation,
                        const jets::LargeJmrSettings& settings) {
-  const TH1& histogram = variation.histogram;
+  const jets::CalibrationHistogram& histogram = variation.histogram;
   if (variation.binning == jets::JmrBinning::pt_abs_mass) {
     const float pt_gev = static_cast<float>(reco.Pt() * settings.mev_to_gev);
     const float mass_gev = static_cast<float>(reco.M() * settings.mev_to_gev);
@@ -97,12 +90,12 @@ double jmr_uncertainty(const jets::P4& reco, const jets::LargeJmrVariation& vari
   }
 
   const double energy = reco.E();
-  const double log_mass_over_energy = TMath::Log(reco.M() / energy);
+  const double log_mass_over_energy = std::log(reco.M() / energy);
   if (std::isnan(log_mass_over_energy)) return 0.0;
   const double x = clamp_inside(energy * settings.mev_to_gev, *histogram.GetXaxis(), settings.axis_edge_offset);
   const double y = clamp_inside(log_mass_over_energy, *histogram.GetYaxis(), settings.axis_edge_offset);
   const double z = clamp_inside(std::abs(reco.Eta()), *histogram.GetZaxis(), settings.axis_edge_offset);
-  return JetHelpers::Interpolate(&histogram, x, y, z) * variation.parameter;
+  return jets::jet_interpolate(histogram, x, y, z) * variation.parameter;
 }
 
 }  // namespace
@@ -110,7 +103,7 @@ double jmr_uncertainty(const jets::P4& reco, const jets::LargeJmrVariation& vari
 namespace jets {
 
 LargeJmrResult apply_large_jmr(const P4& reco, std::optional<int> truth_label,
-                               TruthJetRange truth, const TH1& response,
+                               TruthJetRange truth, const jets::CalibrationHistogram& response,
                                const LargeJmrVariation& variation,
                                const LargeJmrSettings& settings) {
   if (std::abs(reco.Eta()) > settings.max_abs_eta || reco.M() > settings.max_mass_mev ||
@@ -195,7 +188,7 @@ jets::JmrBinning jmr_binning(const std::string& name) {
 struct SourceComponent {
   jets::JmrBinning binning;
   std::string topology;
-  std::unique_ptr<const TH1> histogram;
+  std::unique_ptr<const jets::CalibrationHistogram> histogram;
 };
 
 struct State {
@@ -217,7 +210,7 @@ struct InputIndices {
 class LargeJmrNode final : public correction::PluginNode {
  public:
   LargeJmrNode(InputIndices indices, jets::LargeJmrSettings settings,
-               std::unique_ptr<const TH1> response, std::vector<SourceComponent> components,
+               std::unique_ptr<const jets::CalibrationHistogram> response, std::vector<SourceComponent> components,
                std::unordered_map<std::string, State> states)
       : indices_(indices), settings_(std::move(settings)), response_(std::move(response)),
         components_(std::move(components)), states_(std::move(states)) {}
@@ -273,7 +266,7 @@ class LargeJmrNode final : public correction::PluginNode {
  private:
   InputIndices indices_;
   jets::LargeJmrSettings settings_;
-  std::unique_ptr<const TH1> response_;
+  std::unique_ptr<const jets::CalibrationHistogram> response_;
   std::vector<SourceComponent> components_;
   std::unordered_map<std::string, State> states_;
 };
@@ -322,7 +315,7 @@ void register_large_jmr(correction::PluginRegistry& registry) {
       settings.topology_by_label.emplace_back(topology.GetString(), topology.GetStringLength());
     }
 
-    auto response = jets::restore_histogram(field(document, "response"));
+    auto response = jets::restore_calibration_histogram(field(document, "response"));
     if (response->GetDimension() != 2) {
       throw std::invalid_argument("Large-R JMR response needs a TH2");
     }
@@ -336,10 +329,10 @@ void register_large_jmr(correction::PluginRegistry& registry) {
     for (const auto& item : source_components.GetArray()) {
       const auto binning = jmr_binning(string_field(item, "binning"));
       const auto topology = string_field(item, "topology");
-      auto histogram = jets::restore_histogram(field(item, "histogram"));
+      auto histogram = jets::restore_calibration_histogram(field(item, "histogram"));
       const bool expected_histogram = binning == jets::JmrBinning::pt_abs_mass
           ? histogram->GetDimension() == 2
-          : std::string_view(histogram->ClassName()) == "TH3F";
+          : jets::is_th3f(*histogram);
       if (topology.empty() || !expected_histogram) {
         throw std::invalid_argument("Invalid Large-R JMR component histogram or topology");
       }

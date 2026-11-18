@@ -1,10 +1,5 @@
 #include "large_jms.h"
 
-#include "histogram.h"
-
-#include <JetCalibTools/RootHelpers.h>
-#include <TH3.h>
-#include <TLorentzVector.h>
 #include <correction_plugin.h>
 #include <rapidjson/document.h>
 
@@ -16,11 +11,11 @@
 
 namespace {
 
-double high_edge(const TAxis& axis) {
+double high_edge(const jets::CalibrationAxis& axis) {
   return axis.GetBinLowEdge(axis.GetNbins() + 1);
 }
 
-double clamp_axis(double value, const TAxis& axis, double offset) {
+double clamp_axis(double value, const jets::CalibrationAxis& axis, double offset) {
   const double low = axis.GetBinLowEdge(1);
   const double high = high_edge(axis);
   if (value >= high) value = high - offset;
@@ -28,9 +23,9 @@ double clamp_axis(double value, const TAxis& axis, double offset) {
   return value;
 }
 
-float mass_response(const TH3& histogram, double energy, double log_mass_over_energy,
+float mass_response(const jets::CalibrationHistogram& histogram, double energy, double log_mass_over_energy,
                     double abs_detector_eta, const jets::LargeJmsSettings& settings) {
-  const TAxis& energy_axis = *histogram.GetXaxis();
+  const jets::CalibrationAxis& energy_axis = *histogram.GetXaxis();
   const double high = high_edge(energy_axis);
   if (energy >= high) energy = high - settings.axis_edge_offset;
   if (energy <= settings.minimum_energy_gev) return 1.0f;
@@ -42,12 +37,12 @@ float mass_response(const TH3& histogram, double energy, double log_mass_over_en
                                      settings.axis_edge_offset);
   const double eta = clamp_axis(abs_detector_eta, *histogram.GetZaxis(),
                                 settings.axis_edge_offset);
-  return static_cast<float>(RootHelpers::Interpolate(&histogram, energy, log_mass, eta));
+  return static_cast<float>(jets::calib_interpolate(histogram, energy, log_mass, eta));
 }
 
 class LargeJmsNode final : public correction::PluginNode {
  public:
-  LargeJmsNode(std::array<size_t, 5> indices, std::unique_ptr<const TH3> response,
+  LargeJmsNode(std::array<size_t, 5> indices, std::unique_ptr<const jets::CalibrationHistogram> response,
                jets::LargeJmsSettings settings)
       : indices_(indices), response_(std::move(response)), settings_(settings) {}
 
@@ -77,7 +72,7 @@ class LargeJmsNode final : public correction::PluginNode {
 
  private:
   std::array<size_t, 5> indices_;
-  std::unique_ptr<const TH3> response_;
+  std::unique_ptr<const jets::CalibrationHistogram> response_;
   jets::LargeJmsSettings settings_;
 };
 
@@ -86,7 +81,7 @@ class LargeJmsNode final : public correction::PluginNode {
 namespace jets {
 
 P4 apply_large_jms(const P4& eta_jes, float detector_eta,
-                   const TH3& response, const LargeJmsSettings& settings) {
+                   const jets::CalibrationHistogram& response, const LargeJmsSettings& settings) {
   const double abs_detector_eta = std::abs(static_cast<double>(detector_eta));
   const double mass = eta_jes.M();
   float corrected_mass = static_cast<float>(mass);
@@ -111,7 +106,7 @@ P4 apply_large_jms(const P4& eta_jes, float detector_eta,
     }
   }
 
-  TLorentzVector calo;
+  CartesianP4 calo;
   calo.SetPtEtaPhiM(corrected_pt, eta_jes.Eta(), eta_jes.Phi(), corrected_mass);
   P4 result = eta_jes;
   result.SetPxPyPzE(calo.Px(), calo.Py(), calo.Pz(), calo.E());
@@ -146,11 +141,8 @@ void register_large_jms(correction::PluginRegistry& registry) {
       throw std::invalid_argument("Invalid Large-R JMS energy or axis settings");
     }
 
-    auto histogram = jets::restore_histogram(document["histogram"]);
-    auto* response = dynamic_cast<TH3F*>(histogram.get());
-    if (!response) throw std::invalid_argument("Large-R JMS v1 requires a TH3F response");
-    histogram.release();
-    std::unique_ptr<const TH3> owned_response(response);
+    auto response = jets::restore_calibration_histogram(document["histogram"]);
+    if (!jets::is_th3f(*response)) throw std::invalid_argument("Large-R JMS v1 requires a TH3F response");
 
     using VarType = correction::Variable::VarType;
     std::array<size_t, 5> indices{
@@ -160,6 +152,6 @@ void register_large_jms(correction::PluginRegistry& registry) {
         context.input_index("m", VarType::real),
         context.input_index("detector_eta", VarType::real),
     };
-    return std::make_shared<LargeJmsNode>(indices, std::move(owned_response), settings);
+    return std::make_shared<LargeJmsNode>(indices, std::move(response), settings);
   });
 }
