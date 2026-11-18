@@ -1,0 +1,3 @@
+[submodule "source/correctionlib"]
+	path = source/correctionlib
+	url = https://github.com/gordonwatts/correctionlib.git

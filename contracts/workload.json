@@ -1,0 +1,15 @@
+{
+  "original_release_input_env": "ASG_TEST_FILE_LITE_RUN3_MC",
+  "event_range_half_open": [0, 20000],
+  "event_range_smoke_half_open": [0, 100],
+  "pt_unit": "GeV",
+  "edges": [0, 20, 30, 40, 60, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000],
+  "storage": "sumw_sumw2_with_underflow_and_overflow",
+  "small_r": {"input": "AnalysisJets", "selection": "all input-ordered objects", "weight": "configured per-jet pass/fail NNJVT SF from the release"},
+  "large_r": {"input": "AnalysisLargeRJets", "selection": "stock calibrated kinematic acceptance", "weight": "unit"},
+  "combined": "Independent histograms and state lists for the two collections on one event traversal; retain each matched standalone workload.",
+  "reference_observer": "All input jets before thinning. File, entry, run/event, original index, state, p4, exposed stages, decisions and available statuses. Keep validity and applicability distinct.",
+  "comparisons": ["A:B", "A:C"],
+  "timing": {"controls": ["stored", "nominal", "full"], "A": "framework to persisted ntuple plus separate uproot/Awkward/hist read to persisted histogram", "B": "matched framework leg", "C": "direct original input to persisted histogram", "cpu": 3, "analysis_threads": 1, "warmups": 1, "retained_repetitions": 3, "sample_sd_over_mean_limit": 0.05, "max_individual_deviation_from_median": 0.10, "final_B_over_A_framework_budget": 1.20},
+  "quality": "Keep every observation; known concurrent CPU- or I/O-intensive work gates representative timing. Use bracketed/interleaved matched cohorts. Processing, startup, wall and CPU must be distinguished."
+}

@@ -1,0 +1,7 @@
+/results/
+/build/
+/.venv*/
+/.asetup*
+/install/
+__pycache__/
+*.pyc

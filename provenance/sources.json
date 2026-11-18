@@ -1,0 +1,17 @@
+{
+  "campaign": "jets-skill-c8a2374-20261117",
+  "windows_head_at_intake": "839c57e6f6ebd5a8c0abac3dc5c33c2b33102b87",
+  "skill_last_change": "c8a237459ebc916c00918b51281d0cf8519b196a",
+  "skill_tree": "f1da6df72e37a87ab20ea1c33874643c55841737",
+  "skill_md_git_blob": "185c5faccb2cf1e257cdefdd20ed2a1f806b4fef",
+  "analysisbase": "25.2.117",
+  "platform": "x86_64-el9-gcc15-opt",
+  "compiler": "GNU-15.2.0",
+  "analysisbase_release_data_sha256": "9e4752c5e425f4194232201f092492065f9ce8205fabcb30a8ccb078b4df7d0d",
+  "jet_analysis_config_sha256": "1030ff7e74a1fb6b13048be32e7a348f4e004a261a6ba8a5c20eaf8f566bbe2d",
+  "athena_tag": "release/25.2.117",
+  "athena_tag_object": "e396bbf453f996803fa4954d3ed3d86bc00dbd0a",
+  "athena_commit": "6ce3f7ae7c41dd9eaec170c3c349df15faef7e5c",
+  "correctionlib": "https://github.com/gordonwatts/correctionlib.git",
+  "correctionlib_develop_commit": "3dcfa20ec01fb40c4d5fec58383785519dec1c00"
+}
