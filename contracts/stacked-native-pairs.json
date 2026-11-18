@@ -1,0 +1,165 @@
+{
+  "variants": {
+    "prefix-scalar": {
+      "build": "results/build/final-native-prefix-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix"
+      ],
+      "scopes": [
+        "large",
+        "both"
+      ],
+      "signed": false
+    },
+    "prefix-paired": {
+      "build": "results/build/final-native-prefix-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix"
+      ],
+      "scopes": [
+        "small",
+        "both"
+      ],
+      "signed": true
+    },
+    "truth-scalar": {
+      "build": "results/build/final-prefix-truth-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix",
+        "large-jmr-match-cache"
+      ],
+      "scopes": [
+        "large",
+        "both"
+      ],
+      "signed": false
+    },
+    "truth-paired": {
+      "build": "results/build/final-prefix-truth-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix",
+        "large-jmr-match-cache"
+      ],
+      "scopes": [
+        "small",
+        "both"
+      ],
+      "signed": true
+    },
+    "all-scalar": {
+      "build": "results/build/final-prefix-truth-index-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix",
+        "large-jmr-match-cache",
+        "variable-axis-index"
+      ],
+      "scopes": [
+        "large",
+        "both"
+      ],
+      "signed": false
+    },
+    "all-paired": {
+      "build": "results/build/final-prefix-truth-index-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix",
+        "large-jmr-match-cache",
+        "variable-axis-index"
+      ],
+      "scopes": [
+        "small",
+        "both"
+      ],
+      "signed": true
+    }
+  },
+  "comparisons": {
+    "prefix-switch": {
+      "control": "prefix-scalar",
+      "candidate": "prefix-paired",
+      "scopes": [
+        "both"
+      ]
+    },
+    "truth-switch": {
+      "control": "truth-scalar",
+      "candidate": "truth-paired",
+      "scopes": [
+        "both"
+      ]
+    },
+    "all-switch": {
+      "control": "all-scalar",
+      "candidate": "all-paired",
+      "scopes": [
+        "both"
+      ]
+    },
+    "prefix-truth-scalar": {
+      "control": "prefix-scalar",
+      "candidate": "truth-scalar",
+      "scopes": [
+        "large",
+        "both"
+      ]
+    },
+    "truth-all-scalar": {
+      "control": "truth-scalar",
+      "candidate": "all-scalar",
+      "scopes": [
+        "large",
+        "both"
+      ]
+    },
+    "prefix-all-scalar": {
+      "control": "prefix-scalar",
+      "candidate": "all-scalar",
+      "scopes": [
+        "large",
+        "both"
+      ]
+    },
+    "prefix-truth-paired": {
+      "control": "prefix-paired",
+      "candidate": "truth-paired",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    },
+    "truth-all-paired": {
+      "control": "truth-paired",
+      "candidate": "all-paired",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    },
+    "prefix-all-paired": {
+      "control": "prefix-paired",
+      "candidate": "all-paired",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    }
+  }
+}
