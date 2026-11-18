@@ -239,7 +239,11 @@ def verify_columnar(job: Job, attempt: Path, receipt: dict, inventory: dict,
     rows = re.findall(r"(?m)^(sr|lr) (\d+) unique jets, (\d+) jet visits, (\d+) nominal entries, (\d+) states$", log)
     if {row[0] for row in rows} != selected or len(rows) != len(selected):
         raise ValueError(f"Columnar visit counters differ in {attempt}")
-    items = {}
+    branch_count = re.findall(r"(?m)\), (\d+) input branches$", log)
+    if len(branch_count) != 1:
+        raise ValueError(f"Columnar branch count missing in {attempt}")
+    branch_digest = re.findall(r"(?m)^Input branch SHA-256: ([0-9a-f]{64})$", log)
+    items = {"input_branches": int(branch_count[0]), "input_branch_sha256": branch_digest[0] if branch_digest else None}
     for prefix, jets, visits, counted, states in rows:
         expected_jets = source["collections"][prefix]["objects"]
         expected_states = len(inventory[f"{prefix}_histogram"]) if job.mode == "full" else 1
@@ -288,6 +292,7 @@ class Context:
     c_provider: Path | None
     c_payload: Path | None
     wheel_members: dict
+    matched_read: bool
 
 
 def execute(job: Job, attempt: Path, context: Context, inventory: dict,
@@ -299,6 +304,9 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             str(context.columnar_python), str(context.columnar_script), str(context.input_file),
             str(output), "--mode", job.mode, "--scope", scope, "--repeat", "1", "--events", str(EVENTS),
         ]
+        use_matched_read = context.matched_read and job.mode != "stored"
+        if use_matched_read:
+            command.append("--matched-read")
         if context.cohort == Cohort.faithful:
             command.extend(("--states", str(INVENTORY), "--histogram-spec", str(SPECIFICATION)))
             if job.mode != "stored":
@@ -311,6 +319,9 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             job, attempt, leg, inventory, context.source, context.cohort,
             context.core, context.c_provider, context.wheel_members,
         )
+        counters["matched_read"] = use_matched_read
+        if use_matched_read and not counters["input_branch_sha256"]:
+            raise ValueError(f"Matched-read execution did not report actual input branch identity in {attempt}")
         times = {"total": leg["wall_s"]}
         accounting = {"columnar": cpu_accounting(leg)}
     else:
@@ -370,6 +381,13 @@ def check_campaign_histograms(jobs: dict[Job, tuple]) -> int:
                 if full:
                     check_pair(result, full)
                     compared += 1
+                    if job.arm == "C":
+                        nominal_reads = jobs[job][1]["input_visit_counters"]
+                        full_reads = jobs[Job(job.round, job.scope, "full", job.arm)][1]["input_visit_counters"]
+                        if nominal_reads.get("matched_read"):
+                            fields = ("input_branches", "input_branch_sha256")
+                            if any(nominal_reads[key] != full_reads[key] for key in fields):
+                                raise ValueError(f"Matched C inputs differ for {job.scope.value}, round {job.round}")
         for peer in peers:
             if peer in outputs:
                 exact_archive(result, outputs[peer])
@@ -501,6 +519,7 @@ def run(
     columnar_provider: Annotated[Path | None, typer.Option()] = None,
     columnar_payload: Annotated[Path | None, typer.Option()] = None,
     jobs: Annotated[int | None, typer.Option(min=1, help="Stop after this many new jobs")] = None,
+    matched_read: Annotated[bool, typer.Option(help="Match nominal/full columnar branch requests")] = False,
     diagnostic: Annotated[bool, typer.Option(help="Record visits without including them in timed cohorts")] = False,
 ) -> None:
     """Run or resume one exact full-file cohort on the reserved CPU."""
@@ -596,7 +615,7 @@ def run(
         "guest_node": os.uname().nodename, "guest_release": os.uname().release,
         "original": input_spec, "accepted_observers": proofs,
         "identity_sha256": {str(path): sha256(path) for path in identity_paths},
-        "wheel_members_sha256": wheel_members,
+        "wheel_members_sha256": wheel_members, "columnar_matched_read": matched_read,
         "endpoint": {"A": ["CPRun", "histogram"], "B": ["CPRun", "histogram"],
                      "C": ["one direct PHYSLITE histogram pass"]},
         "endpoint_clock": "monotonic wall including startup and output serialization",
@@ -605,7 +624,7 @@ def run(
     context = Context(
         cohort, input_file, source, framework_python, framework_env, overlay_env, columnar_env,
         libraries, provider, core, columnar_python, columnar_script, columnar_provider,
-        columnar_payload, wheel_members,
+        columnar_payload, wheel_members, matched_read,
     )
 
     with (ROOT / f"results/.benchmark-cpu{CPU}.lock").open("a+") as lock:
