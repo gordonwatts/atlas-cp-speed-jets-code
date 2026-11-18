@@ -100,7 +100,7 @@ paths = {key: (root / plan[key]).resolve(strict=True) for key in
          ("overlay", "provider", "payload", "sdk", "bundle", "installation", "partition")}
 output = (root / plan["output"]).resolve()
 output_names = (
-    "native-profile", "native-profile-decoded", "phases", "chunk-order",
+    "native-profile", "native-profile-decoded", "phases", "python-profile", "chunk-order",
     "C-both", "B-combined", "shipped-both", "shipped-small", "shipped-large",
     "C-small", "C-large", "B-small", "B-large", "recovered-small", "recovered-large",
     "B-small-pilot.exit", "B-large-pilot.exit",
@@ -281,6 +281,8 @@ fi
 run_stage 03-final-phases 3 "$py" tools/profile_final_demo.py \
   "$installed_python" "$demo" "$wheel" "$original" "$output/phases" \
   --stock-both "$stock_both" --stock-small "$stock_small" --stock-large "$stock_large"
+run_stage 03b-python-profile 3 "$py" tools/profile_python_workflow.py \
+  "$installed_python" "$demo" "$wheel" "$original" "$output/python-profile" "$stock_both"
 run_stage 04-chunk-order 3 "$py" packaging/check_chunk_order.py check "$installation" \
   "$original" "$observer" "$stock_32" "$output/chunk-order"
 run_stage 05-combined-objects 3 "${qualify[@]}" objects --scope both
