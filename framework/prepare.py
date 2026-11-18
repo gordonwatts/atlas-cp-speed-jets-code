@@ -99,7 +99,7 @@ def link_bridge(source):
     return source.replace(token, token[:-1] + " JetsCorrectionRuntime )", 1)
 
 
-def prepare(release, destination, framework):
+def prepare(release, destination, framework, profile):
     work_src = destination / "src"
     work_src.mkdir()
     source_receipts = {}
@@ -110,23 +110,43 @@ def prepare(release, destination, framework):
         path.write_bytes(raw)
         source_receipts[name] = {"upstream_sha256": digest(raw)}
 
-    source_pkg = release / "src" / PACKAGE_NAME
+    packages = [PACKAGE_NAME]
+    if profile in ("jvt", "full"):
+        packages.extend(("Reconstruction/Jet/JetMomentTools", "Reconstruction/Jet/JetJvtEfficiency"))
+    if profile == "full":
+        from prepare_full import FULL_PACKAGES
+        packages.extend(FULL_PACKAGES)
+    for package in packages:
+        shutil.copytree(release / "src" / package, work_src / package)
     overlay_pkg = work_src / PACKAGE_NAME
-    shutil.copytree(source_pkg, overlay_pkg)
-    shutil.copytree(framework / "runtime", work_src / "JetsCorrectionRuntime")
+    runtime = work_src / "JetsCorrectionRuntime"
+    shutil.copytree(framework / "runtime", runtime)
+    shutil.copyfile(framework.parent / "provider/event_inputs.h",
+                    runtime / "JetsCorrectionRuntime/EventInputsProvider.h")
     for file in (framework / "nominal").iterdir():
         shutil.copyfile(file, overlay_pkg / "Root" / file.name)
 
-    overrides = {
+    nominal_overrides = {
         **{name: lambda text, sig=sig, call=call: replace_method(text, sig, call)
            for name, (sig, call) in NOMINAL_METHODS.items()},
         "Root/JetCalibrationTool.cxx": validate_tool_recipe,
         "CMakeLists.txt": link_bridge,
     }
+    overrides = {f"{PACKAGE_NAME}/{name}": patch for name, patch in nominal_overrides.items()}
+    if profile in ("jvt", "full"):
+        from prepare_jvt import overrides as jvt_overrides
+        overrides.update(jvt_overrides())
+    if profile == "full":
+        from prepare_full import overrides as full_overrides
+        for relative, full_patch in full_overrides().items():
+            earlier = overrides.get(relative)
+            if earlier is not None:
+                overrides[relative] = lambda text, first=earlier, second=full_patch: second(first(text))
+            else:
+                overrides[relative] = full_patch
     diffs = []
-    for filename, patch in overrides.items():
-        relative = f"{PACKAGE_NAME}/{filename}"
-        path = overlay_pkg / filename
+    for relative, patch in overrides.items():
+        path = work_src / relative
         original = path.read_bytes()
         upstream = download(relative)
         if original != upstream:
@@ -147,5 +167,5 @@ def prepare(release, destination, framework):
 
 
 if __name__ == "__main__":
-    release, destination, framework = map(Path, sys.argv[1:])
-    prepare(release, destination, framework)
+    release, destination, framework = map(Path, sys.argv[1:4])
+    prepare(release, destination, framework, sys.argv[4])

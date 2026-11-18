@@ -6,4 +6,4 @@ find_package( correctionlib CONFIG REQUIRED )
 atlas_add_library( JetsCorrectionRuntime
    JetsCorrectionRuntime/*.h Root/*.cxx
    PUBLIC_HEADERS JetsCorrectionRuntime
-   LINK_LIBRARIES correctionlib )
+   LINK_LIBRARIES correctionlib ${CMAKE_DL_LIBS} )

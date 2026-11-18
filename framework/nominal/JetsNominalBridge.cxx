@@ -1,7 +1,7 @@
 #include "JetsNominalBridge.h"
 
 #include "JetCalibTools/JetEventInfo.h"
-#include "JetsCorrectionRuntime/Runtime.h"
+#include "JetsCorrectionRuntime/JetIO.h"
 
 #include <AthContainers/Accessor.h>
 #include <AthContainers/ConstAccessor.h>
@@ -15,6 +15,7 @@ namespace {
 using jets::framework::bind;
 using jets::framework::CorrectionCall;
 using jets::framework::Values;
+using jets::framework::MomentumAux;
 using P4 = std::array<double, 4>;
 
 constexpr std::string_view small_definition = "AntiKt4EMPFlow";
@@ -22,32 +23,6 @@ constexpr std::string_view large_definition = "AntiKt10UFOCSSKSoftDropBeta100Zcu
 constexpr std::string_view small_config =
     "AntiKt4EMPFlow_MC23a_PreRecR22_Phase2_CalibConfig_ResPU_EtaJES_GSC_241208_InSitu.config";
 constexpr std::string_view large_config = "JES_MC20PreRecommendation_R10_UFO_CSSK_SoftDrop_JMS_R21Insitu_26Nov2024.config";
-
-// Jet_v1 stores these four floats. Passing the exact aux values avoids an
-// extra ROOT phi normalization between the evaluator and the next tool.
-struct MomentumAux {
-  const SG::Accessor<float> pt;
-  const SG::Accessor<float> eta;
-  const SG::Accessor<float> phi;
-  const SG::Accessor<float> mass;
-
-  explicit MomentumAux(const std::string& prefix)
-      : pt(prefix + "pt"), eta(prefix + "eta"), phi(prefix + "phi"), mass(prefix + "m") {}
-
-  void append(const xAOD::Jet& jet, Values& values) const {
-    values.emplace_back(static_cast<double>(pt(jet)));
-    values.emplace_back(static_cast<double>(eta(jet)));
-    values.emplace_back(static_cast<double>(phi(jet)));
-    values.emplace_back(static_cast<double>(mass(jet)));
-  }
-
-  void write(xAOD::Jet& jet, const P4& values) const {
-    pt(jet) = static_cast<float>(values[0]);
-    eta(jet) = static_cast<float>(values[1]);
-    phi(jet) = static_cast<float>(values[2]);
-    mass(jet) = static_cast<float>(values[3]);
-  }
-};
 
 const MomentumAux assigned("");
 const MomentumAux constituent("JetConstitScaleMomentum_");
@@ -87,8 +62,8 @@ void evaluate_and_write(const CorrectionCall& call, const Values& values,
                         const MomentumAux& stage, xAOD::Jet& jet) {
   P4 output;
   call.array(values, output.data(), output.size());
-  stage.write(jet, output);
-  assigned.write(jet, output);
+  stage.write(jet, output.data());
+  assigned.write(jet, output.data());
 }
 }  // namespace
 

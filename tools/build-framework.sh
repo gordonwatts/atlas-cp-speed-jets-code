@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+main() {
 root=$(cd "$(dirname "$0")/.." && pwd)
 label=${1:?supply a new build result name}
 if [[ ! "$label" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
@@ -9,6 +10,24 @@ if [[ ! "$label" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
 fi
 sdk=${2:-"$root/results/build/core-001/venv/lib/python3.14/site-packages/correctionlib"}
 sdk=$(realpath "$sdk")
+jets_framework_profile=${3:-nominal}
+jets_framework_targets=(JetCalibToolsLib)
+jets_framework_libraries=(libJetCalibToolsLib.so libJetsCorrectionRuntime.so)
+case "$jets_framework_profile" in
+  nominal|jvt|full) ;;
+  *)
+    echo "Unknown framework build profile $jets_framework_profile" >&2
+    exit 2
+    ;;
+esac
+if [[ "$jets_framework_profile" != nominal ]]; then
+  jets_framework_targets+=(JetJvtEfficiencyLib)
+  jets_framework_libraries+=(libJetMomentToolsLib.so libJetJvtEfficiencyLib.so)
+fi
+if [[ "$jets_framework_profile" == full ]]; then
+  jets_framework_targets+=(JetUncertaintiesLib AsgAnalysisAlgorithmsLib)
+  jets_framework_libraries+=(libJetUncertaintiesLib.so libParticleJetToolsLib.so libAsgAnalysisAlgorithmsLib.so)
+fi
 mkdir -p "$root/results/build"
 dest="$root/results/build/$label"
 mkdir "$dest"
@@ -27,20 +46,23 @@ test -s "$sdk/lib/libcorrectionlib.so"
 export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1
 grep Cpus_allowed_list /proc/self/status
 sha256sum "$sdk/lib/libcorrectionlib.so" > evaluator.sha256
-python "$root/framework/prepare.py" "$release" "$dest" "$root/framework"
+python "$root/framework/prepare.py" "$release" "$dest" "$root/framework" "$jets_framework_profile"
 cmake -S src/Projects/WorkDir -B build -DATLAS_PROJECT=AnalysisBase \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -Dcorrectionlib_DIR="$sdk/cmake"
-cmake --build build --target JetCalibToolsLib --parallel 1
+cmake --build build --target "${jets_framework_targets[@]}" --parallel 1
 
 # Only the rebuilt implementation and its CorrectionLib client enter the
 # runtime library search path. Component factories, dictionaries and Python
 # modules come from the pinned ABI-compatible release.
 mkdir overlay
-for library in libJetCalibToolsLib.so libJetsCorrectionRuntime.so; do
+for library in "${jets_framework_libraries[@]}"; do
   cp -L "build/$CMTCONFIG/lib/$library" "overlay/$library"
 done
 for library in overlay/*.so; do
   sha256sum "$library"
   readelf -d "$library"
-  ldd "$library"
+  LD_LIBRARY_PATH="$dest/overlay:$sdk/lib:$LD_LIBRARY_PATH" ldd "$library"
 done > overlay-libraries.txt
+}
+
+main "$@"

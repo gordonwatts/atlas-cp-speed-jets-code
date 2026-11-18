@@ -1,0 +1,24 @@
+#include "JetsCorrectionRuntime/Runtime.h"
+
+namespace jets::framework {
+
+template <class VertexContainer>
+std::array<double, 5> event_inputs(const VertexContainer& vertices,
+                                  std::int64_t pv, bool has_pv, double npv, bool has_npv) {
+  std::vector<std::int32_t> types, tracks;
+  types.reserve(vertices.size());
+  tracks.reserve(vertices.size());
+  for (const auto* vertex : vertices) {
+    types.push_back(static_cast<std::int32_t>(vertex->vertexType()));
+    tracks.push_back(static_cast<std::int32_t>(vertex->nTrackParticles()));
+  }
+  const auto lease = borrow_vertices(types, tracks);
+  static const auto& call = bind("jet_event_inputs", 5,
+      {"event", "pv_index", "pv_index_present", "npv", "npv_present"});
+  const Values inputs{std::int64_t(0), pv, std::int64_t(has_pv), npv, std::int64_t(has_npv)};
+  std::array<double, 5> result;
+  call.array(inputs, result.data(), result.size());
+  return result;
+}
+
+}  // namespace jets::framework

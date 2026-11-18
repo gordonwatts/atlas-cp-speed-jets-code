@@ -2,6 +2,8 @@
 
 #include <correction_plugin.h>
 
+#include <dlfcn.h>
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +33,9 @@ public:
     const fs::path payload = required_file("JETS_PAYLOAD");
     correction::PluginRegistry registry;
     registry.load_library(provider.string());
+    void* handle = dlopen(provider.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    if (!handle) throw std::runtime_error(std::string("missing framework provider handle: ") + dlerror());
+    provider_ = std::shared_ptr<void>(handle, [](void* loaded) { (void)dlclose(loaded); });
     corrections_ = correction::CorrectionSet::from_file(payload.string(), registry);
 
     if (const char* trace = std::getenv("JETS_FRAMEWORK_TRACE")) {
@@ -54,6 +59,8 @@ public:
       const auto start = row.find('/');
       if (start == std::string::npos) continue;
       if (row.find("libJet") == std::string::npos &&
+          row.find("libParticleJetToolsLib.so") == std::string::npos &&
+          row.find("libAsgAnalysisAlgorithmsLib.so") == std::string::npos &&
           row.find("libjets.so") == std::string::npos &&
           row.find("libcorrectionlib") == std::string::npos)
         continue;
@@ -79,12 +86,25 @@ public:
     return *slot;
   }
 
+  void* symbol(const char* name) const {
+    void* result = dlsym(provider_.get(), name);
+    if (!result)
+      throw std::runtime_error(std::string("missing framework provider symbol: ") + name);
+    return result;
+  }
+
 private:
+  std::shared_ptr<void> provider_;
   std::unique_ptr<correction::CorrectionSet> corrections_;
   std::ofstream trace_;
   std::map<std::string, std::unique_ptr<CorrectionCall>> calls_;
   std::mutex mutex_;
 };
+
+Runtime& runtime() {
+  static Runtime instance;
+  return instance;
+}
 }  // namespace
 
 namespace jets::framework {
@@ -109,8 +129,11 @@ uint64_t CorrectionCall::count() const {
 
 const CorrectionCall& bind(std::string_view name, size_t outputs,
                            std::initializer_list<std::string_view> inputs) {
-  static Runtime runtime;
-  return runtime.bind(name, outputs, inputs);
+  return runtime().bind(name, outputs, inputs);
+}
+
+void* provider_symbol(const char* name) {
+  return runtime().symbol(name);
 }
 
 }  // namespace jets::framework

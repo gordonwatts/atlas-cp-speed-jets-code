@@ -29,6 +29,8 @@ private:
 const CorrectionCall& bind(std::string_view name, size_t outputs,
                             std::initializer_list<std::string_view> inputs);
 
+void* provider_symbol(const char* name);
+
 }  // namespace jets::framework
 
 #endif

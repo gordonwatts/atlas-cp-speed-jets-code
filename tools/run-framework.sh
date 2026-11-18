@@ -59,10 +59,47 @@ printf '%d\n' "$status" > job-exit-code
 test "$status" -eq 0
 grep -q 'worker finished successfully' job.log
 test -s framework.root
-grep -Fqx "loaded $overlay/libJetCalibToolsLib.so" framework-trace.txt
-grep -Fqx "loaded $overlay/libJetsCorrectionRuntime.so" framework-trace.txt
-grep -Fqx "loaded $provider" framework-trace.txt
-grep -Fqx "loaded $core" framework-trace.txt
+require_loaded() {
+  local expected_path=$1
+  local filename=${expected_path##*/}
+  local matches
+  matches=$(awk -v stem="$filename" '
+    $1 == "loaded" {
+      candidate = $0
+      sub(/^loaded /, "", candidate)
+      n = split(candidate, segments, "/")
+      if (segments[n] == stem) print candidate
+    }
+  ' framework-trace.txt)
+  if [[ "$matches" != "$expected_path" ]]; then
+    echo "Expected precisely $expected_path but observed $matches" >&2
+    return 1
+  fi
+}
+require_loaded "$overlay/libJetCalibToolsLib.so"
+require_loaded "$overlay/libJetsCorrectionRuntime.so"
+require_loaded "$provider"
+require_loaded "$core"
 for stage in small_pileup small_eta_jes small_gsc large_eta_jes large_jms; do
   grep -Eq "^count $stage [1-9][0-9]*$" framework-trace.txt
 done
+
+if [[ -s "$overlay/libJetJvtEfficiencyLib.so" ]]; then
+  require_loaded "$overlay/libJetMomentToolsLib.so"
+  require_loaded "$overlay/libJetJvtEfficiencyLib.so"
+  for stage in small_nnjvt_update small_nnjvt_select small_nnjvt_sf; do
+    grep -Eq "^count $stage [1-9][0-9]*$" framework-trace.txt
+  done
+fi
+
+if [[ -s "$overlay/libJetUncertaintiesLib.so" ]]; then
+  for library in libJetUncertaintiesLib.so libParticleJetToolsLib.so libAsgAnalysisAlgorithmsLib.so; do
+    require_loaded "$overlay/$library"
+  done
+  for stage in small_uncertainty large_uncertainty jet_event_inputs jet_pileup_truth large_selection jet_event_sf; do
+    grep -Eq "^count $stage [1-9][0-9]*$" framework-trace.txt
+  done
+  if [[ "$jets_framework_mode" == full ]]; then
+    grep -Eq "^count large_jmr [1-9][0-9]*$" framework-trace.txt
+  fi
+fi
