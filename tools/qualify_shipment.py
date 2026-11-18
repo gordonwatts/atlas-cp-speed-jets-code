@@ -1,9 +1,9 @@
 """Run a named end-to-end validation step against one frozen jet shipment."""
+from enum import Enum
 import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 from typing import Annotated
 
 import typer
@@ -16,9 +16,55 @@ THREAD_LIMITS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "
                  "BLIS_NUM_THREADS", "ROOT_MAX_THREADS", "RAYON_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
 
 
-def main(specification: Path, stage: str, scope: str = "both",
-         jobs: Annotated[int | None, typer.Option(min=1)] = None):
+class RecheckScope(str, Enum):
+    small = "small"
+    large = "large"
+    combined = "combined"
+
+
+class RecheckMode(str, Enum):
+    stored = "stored"
+    nominal = "nominal"
+    full = "full"
+
+
+class RecheckPair(str, Enum):
+    AB = "AB"
+    AC = "AC"
+
+
+def main(
+    specification: Path,
+    stage: str,
+    scope: str = "both",
+    jobs: Annotated[int | None, typer.Option(min=1)] = None,
+    recheck_of: Annotated[Path | None, typer.Option(help="Completed original production journal")] = None,
+    recheck_scope: Annotated[RecheckScope | None, typer.Option()] = None,
+    recheck_mode: Annotated[RecheckMode | None, typer.Option()] = None,
+    recheck_pair: Annotated[RecheckPair | None, typer.Option(help="AB framework budget or AC saved histogram")] = None,
+    recheck_output: Annotated[Path | None, typer.Option(help="Fresh result directory for this bounded recheck")] = None,
+):
     """Run on CPU 3. Each step's own tool writes its detailed immutable receipts."""
+    requested = (recheck_of, recheck_scope, recheck_mode, recheck_pair, recheck_output)
+    recheck_args = []
+    if any(value is not None for value in requested):
+        if any(value is None for value in requested):
+            raise typer.BadParameter(
+                "Provide --recheck-of, --recheck-scope, --recheck-mode, --recheck-pair and --recheck-output together"
+            )
+        if stage != "time" or scope != "both" or jobs is not None:
+            raise typer.BadParameter("A paired recheck requires the time stage without --jobs or a separate --scope")
+        if recheck_pair == RecheckPair.AB and recheck_mode == RecheckMode.stored:
+            raise typer.BadParameter("AB rechecks support nominal and full; AC also supports stored")
+        recheck_of = (ROOT / recheck_of).resolve(strict=True)
+        recheck_output = (ROOT / recheck_output).resolve()
+        if (recheck_output.exists() or recheck_output.is_relative_to(recheck_of)
+                or recheck_of.is_relative_to(recheck_output)):
+            raise typer.BadParameter("Provide a fresh result directory outside the original journal")
+        recheck_args = [
+            "--recheck-of", recheck_of, "--recheck-scope", recheck_scope.value,
+            "--recheck-mode", recheck_mode.value, "--recheck-pair", recheck_pair.value,
+        ]
     if os.sched_getaffinity(0) != {3} or len(list(Path("/proc/self/task").iterdir())) != 1:
         raise ValueError("Launch the controller with one thread on CPU 3")
     plan = json.loads(specification.read_text())
@@ -27,6 +73,11 @@ def main(specification: Path, stage: str, scope: str = "both",
     paths = {key: (ROOT / plan[key]).resolve(strict=True) for key in
              ("overlay", "provider", "payload", "sdk", "bundle", "installation", "partition")}
     output = (ROOT / plan["output"]).resolve()
+    production = output / "production"
+    if recheck_output is not None and (
+        recheck_output.is_relative_to(production) or production.is_relative_to(recheck_output)
+    ):
+        raise typer.BadParameter("Keep the formal production result path separate from a paired recheck")
     output.mkdir(exist_ok=True)
     original = Path(json.loads((ROOT / "config/jets-input.json").read_text())["path"]).resolve(strict=True)
     bundle = paths["bundle"]
@@ -105,12 +156,13 @@ def main(specification: Path, stage: str, scope: str = "both",
             args.extend(["--payload-partition", paths["partition"], "--scoped-acceptance", proofs])
         if jobs is not None:
             args.extend(["--jobs", str(jobs)])
-        run(REF_PYTHON, "tools/benchmark_campaign.py", "run", output / "production", "--cohort", "production",
+        result = recheck_output if recheck_output is not None else production
+        run(REF_PYTHON, "tools/benchmark_campaign.py", "run", result, "--cohort", "production",
             "--overlay", paths["overlay"], "--provider", paths["provider"], "--payload", paths["payload"],
             "--sdk", paths["sdk"], "--columnar-python", python, "--columnar-script", script,
             "--wheel", wheel, "--source-verification", REFERENCE / "full-clean-001/verification.json",
             "--b-verification", framework / "observer-comparison.json",
-            "--c-verification", combined_c / "comparison.json", "--matched-read", *args)
+            "--c-verification", combined_c / "comparison.json", "--matched-read", *args, *recheck_args)
     else:
         raise ValueError(f"Unknown qualification step {stage}")
 
