@@ -1,0 +1,56 @@
+CommonServices:
+  systematicsHistogram: systematicsList
+  separateWeightSystematics: true
+
+Jets:
+- containerName: SmallR
+  jetCollection: AntiKt4EMPFlowJets
+  recalibratePhyslite: true
+  runTruthJetTagging: true
+  runGhostMuonAssociation: false
+  runUncertainties: true
+  systematicsModelJES: Category
+  systematicsModelJER: Full
+  runJERsystematicsOnData: false
+  runJvtUpdate: false
+  runNNJvtUpdate: true
+  runJvtSelection: false
+  runFJvtSelection: false
+  JVTWorkingPoint:
+  - selectionName: baselineJvt
+    jvtWP: FixedEffPt
+    useSuffix: false
+
+- containerName: LargeR
+  jetCollection: AntiKt10UFOCSSKSoftDropBeta100Zcut10Jets
+  recalibratePhyslite: true
+  runTruthJetTagging: true
+  runGhostMuonAssociation: false
+  runUncertainties: true
+  systematicsModelJER: Full
+  systematicsModelJMS: Full
+  systematicsModelJMR: Full
+  runJERsystematicsOnData: false
+  minPt: 200000.0
+  maxPt: 3000000.0
+  maxEta: 0.0
+  maxRapidity: 2.0
+  minMass: 40000.0
+  maxMass: 600000.0
+
+Output:
+  treeName: analysis
+  storeSelectionFlags: false
+  containers:
+    sr_: SmallR
+    lr_: LargeR
+    "": EventInfo
+  commands:
+  - optional disable .*
+  - enable ^sr_pt$
+  - enable ^sr_jvtEfficiency
+  - enable ^lr_pt$
+  vars:
+  - SmallR_%SYS%.no_jvt -> sr_jvtValidity_%SYS% type=uint32
+  - LargeR_%SYS%.selectPtEta -> lr_selectPtEta_%SYS% type=uint32
+  - LargeR_%SYS%.selectMass -> lr_selectMass_%SYS% type=uint32

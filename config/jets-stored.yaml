@@ -1,0 +1,10 @@
+CommonServices:
+  systematicsHistogram: systematicsList
+  runSystematics: false
+
+Output:
+  treeName: analysis
+  storeSelectionFlags: false
+  vars:
+  - AnalysisJets.pt -> sr_pt_NOSYS type=float
+  - AnalysisLargeRJets.pt -> lr_pt_NOSYS type=float

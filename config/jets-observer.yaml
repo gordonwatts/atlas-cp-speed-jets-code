@@ -1,0 +1,140 @@
+CommonServices:
+  systematicsHistogram: systematicsList
+  separateWeightSystematics: true
+
+Jets:
+- containerName: SmallR
+  jetCollection: AntiKt4EMPFlowJets
+  recalibratePhyslite: true
+  runTruthJetTagging: true
+  runGhostMuonAssociation: false
+  runUncertainties: true
+  systematicsModelJES: Category
+  systematicsModelJER: Full
+  runJERsystematicsOnData: false
+  runJvtUpdate: false
+  runNNJvtUpdate: true
+  runJvtSelection: false
+  runFJvtSelection: false
+  JVTWorkingPoint:
+  - selectionName: baselineJvt
+    jvtWP: FixedEffPt
+    useSuffix: false
+
+- containerName: LargeR
+  jetCollection: AntiKt10UFOCSSKSoftDropBeta100Zcut10Jets
+  recalibratePhyslite: true
+  runTruthJetTagging: true
+  runGhostMuonAssociation: false
+  runUncertainties: true
+  systematicsModelJER: Full
+  systematicsModelJMS: Full
+  systematicsModelJMR: Full
+  runJERsystematicsOnData: false
+  minPt: 200000.0
+  maxPt: 3000000.0
+  maxEta: 0.0
+  maxRapidity: 2.0
+  minMass: 40000.0
+  maxMass: 600000.0
+
+
+AddConfigBlocks:
+- modulePath: reference_observer
+  functionName: ReferenceObserver
+  algName: ReferenceObserver
+  pos: Output
+
+ReferenceObserver: {}
+
+Output:
+  treeName: analysis
+  containers:
+    sr_: SmallR
+    lr_: LargeR
+    "": EventInfo
+  vars:
+  - SmallR_%SYS%.refOriginalIndex -> sr_index_%SYS% type=uint32
+  - LargeR_%SYS%.refOriginalIndex -> lr_index_%SYS% type=uint32
+  - SmallR_%SYS%.refJesJerValidity -> sr_jesJerValidity_%SYS% type=uint32
+  - EventInfo.eventNumber -> eventNumber type=uint64
+  - EventInfo.runNumber -> runNumber type=uint32
+  - EventInfo.lumiBlock -> lumiBlock type=uint32
+  - EventInfo.mcChannelNumber -> mcChannelNumber type=uint32
+  - EventInfo.jvt_effSF_%SYS% -> sr_eventSF_%SYS% type=float
+  - SmallR_%SYS%.jvt_selection -> sr_jvtSelection_%SYS% type=char
+  - SmallR_%SYS%.no_jvt -> sr_jvtValidity_%SYS% type=uint32
+  - SmallR_%SYS%.NNJvt -> sr_nnjvt_%SYS% type=float
+  - SmallR_%SYS%.NNJvtPass -> sr_nnjvtPass_%SYS% type=char
+  - SmallR_%SYS%.isJvtHS -> sr_isJvtHS_%SYS% type=char
+  - LargeR_%SYS%.outOfValidity -> lr_jesJERJMSValidity_%SYS% type=uint32
+  - LargeR_%SYS%.refJmrValidityOrAbsent -> lr_jmrValidity_%SYS% type=uint32
+  - LargeR_%SYS%.selectPtEta -> lr_selectPtEta_%SYS% type=uint32
+  - LargeR_%SYS%.selectMass -> lr_selectMass_%SYS% type=uint32
+  - LargeR_%SYS%.R10TruthLabel_R21Precision_2022v1 -> lr_truthLabel_%SYS% type=int
+  - LargeR_%SYS%.D2 -> lr_d2_%SYS% type=float
+  - LargeR_%SYS%.Tau1_wta -> lr_tau1_%SYS% type=float
+  - LargeR_%SYS%.Tau2_wta -> lr_tau2_%SYS% type=float
+  - LargeR_%SYS%.Tau3_wta -> lr_tau3_%SYS% type=float
+  - LargeR_%SYS%.Split12 -> lr_split12_%SYS% type=float
+  - LargeR_%SYS%.Split23 -> lr_split23_%SYS% type=float
+  - SmallR_%SYS%.pt -> sr_p4pt_%SYS% type=float
+  - SmallR_STEP2_NOSYS.pt -> sr_calibpt_NOSYS type=float
+  - SmallR_STEP3_%SYS%.pt -> sr_uncertpt_%SYS% type=float
+  - AnalysisJets.pt -> sr_storedpt_NOSYS type=float
+  - AnalysisJets.JetConstitScaleMomentum_pt -> sr_constpt_NOSYS type=float
+  - SmallR_%SYS%.eta -> sr_p4eta_%SYS% type=float
+  - SmallR_STEP2_NOSYS.eta -> sr_calibeta_NOSYS type=float
+  - SmallR_STEP3_%SYS%.eta -> sr_uncerteta_%SYS% type=float
+  - AnalysisJets.eta -> sr_storedeta_NOSYS type=float
+  - AnalysisJets.JetConstitScaleMomentum_eta -> sr_consteta_NOSYS type=float
+  - SmallR_%SYS%.phi -> sr_p4phi_%SYS% type=float
+  - SmallR_STEP2_NOSYS.phi -> sr_calibphi_NOSYS type=float
+  - SmallR_STEP3_%SYS%.phi -> sr_uncertphi_%SYS% type=float
+  - AnalysisJets.phi -> sr_storedphi_NOSYS type=float
+  - AnalysisJets.JetConstitScaleMomentum_phi -> sr_constphi_NOSYS type=float
+  - SmallR_%SYS%.m -> sr_p4m_%SYS% type=float
+  - SmallR_STEP2_NOSYS.m -> sr_calibm_NOSYS type=float
+  - SmallR_STEP3_%SYS%.m -> sr_uncertm_%SYS% type=float
+  - AnalysisJets.m -> sr_storedm_NOSYS type=float
+  - AnalysisJets.JetConstitScaleMomentum_m -> sr_constm_NOSYS type=float
+  - LargeR_%SYS%.pt -> lr_p4pt_%SYS% type=float
+  - LargeR_STEP2_NOSYS.pt -> lr_calibpt_NOSYS type=float
+  - LargeR_STEP3_%SYS%.pt -> lr_uncertpt_%SYS% type=float
+  - AnalysisLargeRJets.pt -> lr_storedpt_NOSYS type=float
+  - AnalysisLargeRJets.JetConstitScaleMomentum_pt -> lr_constpt_NOSYS type=float
+  - LargeR_%SYS%.eta -> lr_p4eta_%SYS% type=float
+  - LargeR_STEP2_NOSYS.eta -> lr_calibeta_NOSYS type=float
+  - LargeR_STEP3_%SYS%.eta -> lr_uncerteta_%SYS% type=float
+  - AnalysisLargeRJets.eta -> lr_storedeta_NOSYS type=float
+  - AnalysisLargeRJets.JetConstitScaleMomentum_eta -> lr_consteta_NOSYS type=float
+  - LargeR_%SYS%.phi -> lr_p4phi_%SYS% type=float
+  - LargeR_STEP2_NOSYS.phi -> lr_calibphi_NOSYS type=float
+  - LargeR_STEP3_%SYS%.phi -> lr_uncertphi_%SYS% type=float
+  - AnalysisLargeRJets.phi -> lr_storedphi_NOSYS type=float
+  - AnalysisLargeRJets.JetConstitScaleMomentum_phi -> lr_constphi_NOSYS type=float
+  - LargeR_%SYS%.m -> lr_p4m_%SYS% type=float
+  - LargeR_STEP2_NOSYS.m -> lr_calibm_NOSYS type=float
+  - LargeR_STEP3_%SYS%.m -> lr_uncertm_%SYS% type=float
+  - AnalysisLargeRJets.m -> lr_storedm_NOSYS type=float
+  - AnalysisLargeRJets.JetConstitScaleMomentum_m -> lr_constm_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetPileupScaleMomentum_pt -> sr_pileuppt_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetPileupScaleMomentum_eta -> sr_pileupeta_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetPileupScaleMomentum_phi -> sr_pileupphi_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetPileupScaleMomentum_m -> sr_pileupm_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetEtaJESScaleMomentum_pt -> sr_etaJESpt_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetEtaJESScaleMomentum_eta -> sr_etaJESeta_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetEtaJESScaleMomentum_phi -> sr_etaJESphi_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetEtaJESScaleMomentum_m -> sr_etaJESm_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetGSCScaleMomentum_pt -> sr_gscpt_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetGSCScaleMomentum_eta -> sr_gsceta_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetGSCScaleMomentum_phi -> sr_gscphi_NOSYS type=float
+  - SmallR_STEP2_NOSYS.JetGSCScaleMomentum_m -> sr_gscm_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetEtaJESScaleMomentum_pt -> lr_etaJESpt_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetEtaJESScaleMomentum_eta -> lr_etaJESeta_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetEtaJESScaleMomentum_phi -> lr_etaJESphi_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetEtaJESScaleMomentum_m -> lr_etaJESm_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetJMSScaleMomentum_pt -> lr_jmspt_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetJMSScaleMomentum_eta -> lr_jmseta_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetJMSScaleMomentum_phi -> lr_jmsphi_NOSYS type=float
+  - LargeR_STEP2_NOSYS.JetJMSScaleMomentum_m -> lr_jmsm_NOSYS type=float

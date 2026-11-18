@@ -1,0 +1,15 @@
+{
+  "bins_gev": [0, 20, 30, 40, 60, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000],
+  "flow": "keep underflow and overflow",
+  "output": "uncompressed NPZ with state, edges, entries, sumw and sumw2 arrays",
+  "chunk_events": 1000,
+  "small_r": {
+    "calibrated": "all objects in stored order; raw per-jet NNJVT pass/fail SF if stock validity accepts, otherwise 1",
+    "stored": "all stored objects with unit weights"
+  },
+  "large_r": {
+    "calibrated": "stock selectPtEta and selectMass both equal CP::selectionAccept(); unit weights",
+    "stored": "all stored objects with unit weights"
+  },
+  "systematic_axis": "each collection's observable states in release service order; append small-R weight-only states in release weight-only order"
+}
