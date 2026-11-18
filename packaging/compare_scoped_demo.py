@@ -104,17 +104,22 @@ def check(
     installation, original, authority, output = (path.resolve() for path in (installation, original, authority, output))
     commands, frozen = installed_commands(installation)
     output.mkdir()
+    defaults = frozen.get("demo_defaults")
+    canonical_options = ["--no-compact-payload", "--no-reuse-nominal-nnjvt-update"] if defaults else []
     cases = [
-        ("pip", "canonical-full", "full", []),
-        ("pip", "indexed-full", "full", ["--compact-payload"]),
-        ("pip", "indexed-nominal", "nominal", ["--compact-payload"]),
-        ("uv", "indexed-full", "full", ["--compact-payload"]),
+        ("pip", "canonical-full", "full", canonical_options, False),
+        ("pip", "indexed-full", "full", ["--compact-payload"], True),
+        ("pip", "indexed-nominal", "nominal", ["--compact-payload"], True),
+        ("uv", "indexed-full", "full", ["--compact-payload"], True),
     ]
+    if defaults:
+        cases.append(("pip", "selected-default-full", "full", [],
+                      scope.value in defaults["compact_payload_default_scopes"]))
     digests = {}
     projections = {}
     if verify_projection_identity:
         expected_scope = installed_index(installation).get(scope.value)
-    for executable, stage, mode, options in cases:
+    for executable, stage, mode, options, expect_projection in cases:
         name = f"{executable}-{stage}"
         path = output / f"{name}.npz"
         run(command(commands[executable], original, path, scope, mode, events, options), output, name, 3,
@@ -122,11 +127,13 @@ def check(
         log = output / f"{name}.log"
         digests[name] = branch_digest(log)
         if verify_projection_identity:
-            projections[name] = projection_receipt(log, expected_scope if options else None)
+            projections[name] = projection_receipt(log, expected_scope if expect_projection else None)
     authority_full = output / "pip-canonical-full.npz"
     compare(authority_full, output / "pip-indexed-full.npz")
     compare(authority_full, output / "uv-indexed-full.npz")
     compare(authority, authority_full)
+    if defaults:
+        compare(authority_full, output / "pip-selected-default-full.npz")
     check_pair(output / "pip-indexed-nominal.npz", authority_full)
     if len(set(digests.values())) != 1:
         raise ValueError(f"Resolved physical branch sets changed: {digests}")
@@ -168,7 +175,7 @@ def measure(
         raise ValueError("Prebuilt payload differs from the checked scope partition")
     output.mkdir()
     options = {
-        "canonical": [],
+        "canonical": ["--no-compact-payload"] if "demo_defaults" in frozen else [],
         "prebuilt": ["--payload", str(prebuilt)],
         "indexed": ["--compact-payload"],
     }

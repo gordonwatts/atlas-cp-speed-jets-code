@@ -2,6 +2,7 @@
 
 import base64
 import csv
+from enum import Enum
 import hashlib
 import io
 import json
@@ -31,6 +32,21 @@ LICENSES = (
 CLEAN_ELF_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
+class CompactDefault(str, Enum):
+    off = "off"
+    small = "small"
+    large = "large"
+    both = "both"
+
+
+COMPACT_DEFAULT_SCOPES = {
+    CompactDefault.off: (),
+    CompactDefault.small: ("small",),
+    CompactDefault.large: ("large",),
+    CompactDefault.both: ("small", "large"),
+}
+
+
 def file_digest(path: Path) -> bytes:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").digest()
@@ -46,7 +62,8 @@ def replace_once(source: str, before: str, after: str) -> str:
     return source.replace(before, after, 1)
 
 
-def use_compact_payload(source: str) -> str:
+def use_compact_payload(source: str, default_scopes: tuple[str, ...]) -> str:
+    scope_help = "Enabled by default for " + " and ".join(default_scopes) + "." if default_scopes else "Default off."
     source = replace_once(source, "from pathlib import Path\n",
                           "from pathlib import Path\nfrom tempfile import TemporaryDirectory\n")
     source = replace_once(
@@ -55,15 +72,19 @@ def use_compact_payload(source: str) -> str:
     )
     source = replace_once(
         source, "    scope: Scope = Scope.both,\n",
-        '    compact_payload: Annotated[bool, typer.Option(\n'
-        '        "--compact-payload", help="Load only the selected collection from the packaged payload",\n'
-        '    )] = False,\n'
+        '    compact_payload: Annotated[bool | None, typer.Option(\n'
+        '        "--compact-payload/--no-compact-payload",\n'
+        f'        help="Load only the selected collection from the packaged payload. {scope_help}",\n'
+        '    )] = None,\n'
         '    scope: Scope = Scope.both,\n',
     )
     source = replace_once(
         source, '    payload = payload or DATA / "jets.json"',
         '    canonical = DATA / "jets.json"\n'
-        '    if compact_payload and payload is not None and payload.resolve() != canonical.resolve():\n'
+        '    packaged_payload = payload is None or payload.resolve() == canonical.resolve()\n'
+        '    if compact_payload is None:\n'
+        f'        compact_payload = packaged_payload and scope.value in {default_scopes!r}\n'
+        '    if compact_payload and not packaged_payload:\n'
         '        raise typer.BadParameter("--compact-payload requires the bundled CorrectionSet")\n'
         '    payload = payload or canonical',
     )
@@ -82,8 +103,35 @@ def use_compact_payload(source: str) -> str:
     )
 
 
-def build_visible_script(wheel: Path, version: str, output: Path, compact: bool = False) -> None:
-    source = (CHECKOUT / "columnar/jets.py").read_text()
+def use_nnjvt_default(source: str, enabled: bool) -> str:
+    source = replace_once(
+        source,
+        '        "--reuse-nominal-nnjvt-update", help="Trial bitwise-identical nominal NNJvt update rows in full mode",\n'
+        '    )] = False,\n',
+        '        "--reuse-nominal-nnjvt-update/--no-reuse-nominal-nnjvt-update",\n'
+        '        help="Reuse bitwise-identical nominal NNJvt rows for small-R full systematics",\n'
+        f'    )] = {enabled!r},\n',
+    )
+    return replace_once(
+        source, "    selected = selected_collections(scope)\n",
+        "    selected = selected_collections(scope)\n"
+        '    reuse_nominal_nnjvt_update = reuse_nominal_nnjvt_update and mode == Mode.full and "sr" in selected\n',
+    )
+
+
+def build_visible_script(
+    wheel: Path,
+    version: str,
+    output: Path,
+    compact: bool = False,
+    *,
+    compact_defaults: tuple[str, ...] = (),
+    reuse_nnjvt_default: bool = False,
+    columnar_source: bytes | None = None,
+) -> None:
+    if not compact and compact_defaults:
+        raise ValueError("Compact defaults require the packaged byte-range index")
+    source = (columnar_source if columnar_source is not None else (CHECKOUT / "columnar/jets.py").read_bytes()).decode()
     source = replace_once(source, "# dependencies = [", f'# dependencies = [\n#   "correctionlib=={version}",')
     source = replace_once(
         source, "# ///\n\"\"\"Read original PHYSLITE",
@@ -133,7 +181,8 @@ def build_visible_script(wheel: Path, version: str, output: Path, compact: bool 
         "        np.savez(stream, **results)"
     )
     if compact:
-        source = use_compact_payload(source)
+        source = use_compact_payload(source, compact_defaults)
+    source = use_nnjvt_default(source, reuse_nnjvt_default)
     compile(source, output.as_posix(), "exec")
     output.write_text(source)
 
@@ -256,7 +305,13 @@ def build(
     license_dir: Path,
     patchelf: Path,
     variant: str = "atlasjets1",
-    scope_index: Annotated[Path | None, typer.Option(help="Include the index for opt-in compact loading")] = None,
+    scope_index: Annotated[Path | None, typer.Option(help="Include the index for compact loading")] = None,
+    compact_default: Annotated[CompactDefault, typer.Option(
+        help="Default compact loading by single-collection scope. Both enables small and large separately.",
+    )] = CompactDefault.off,
+    reuse_nominal_nnjvt_default: Annotated[bool, typer.Option(
+        help="Default to exact-input NNJvt reuse for small-R full systematics.",
+    )] = False,
 ) -> None:
     """Assemble a local patched-precision CorrectionLib wheel and a visible runnable script."""
     if re.fullmatch(r"atlasjets\d+", variant) is None:
@@ -264,6 +319,10 @@ def build(
     output = output.resolve()
     provider = provider.resolve(strict=True)
     payload = payload.resolve(strict=True)
+    compact_scopes = COMPACT_DEFAULT_SCOPES[compact_default]
+    if scope_index is None and compact_scopes:
+        raise ValueError("--compact-default requires --scope-index")
+    columnar_source = (CHECKOUT / "columnar/jets.py").read_bytes()
     payload_identity = identify(payload)
     if scope_index is not None:
         layout = json.loads(scope_index.read_text())
@@ -323,7 +382,17 @@ def build(
             "payload": payload_identity,
             "payload_provenance": identify(provenance),
             "compiler_inputs": {name: identify(compiler_dir / name) for name in BUNDLED_COMPILER},
-            "columnar_source": identify(CHECKOUT / "columnar/jets.py"),
+            "columnar_source": {
+                "bytes": len(columnar_source), "sha256": hashlib.sha256(columnar_source).hexdigest(),
+            },
+            "demo_defaults": {
+                "mode": "full",
+                "scope": "both",
+                "compact_payload_default_scopes": list(compact_scopes),
+                "reuse_nominal_nnjvt_update": reuse_nominal_nnjvt_default,
+                "reuse_nominal_nnjvt_update_modes": ["full"],
+                "reuse_nominal_nnjvt_update_scopes": ["small", "both"],
+            },
             "input_transport": identify(CHECKOUT / "jet_transport.py"),
             "native_members": relocate_and_audit(patchelf.resolve(strict=True), stage, output / "elf-audit"),
             "git_commit": subprocess.check_output(["git", "-C", str(CHECKOUT), "rev-parse", "HEAD"],
@@ -332,10 +401,14 @@ def build(
         if scope_index is not None:
             build_identity["scope_index"] = identify(scope_index)
             build_identity["scope_projector"] = identify(assets / "payload_ranges.py")
-        (data / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
         wheel = output / f"correctionlib-{version}-{NATIVE_TAG}.whl"
         script = output / "jets_demo.py"
-        build_visible_script(wheel, version, script, compact=scope_index is not None)
+        build_visible_script(
+            wheel, version, script, compact=scope_index is not None, compact_defaults=compact_scopes,
+            reuse_nnjvt_default=reuse_nominal_nnjvt_default, columnar_source=columnar_source,
+        )
+        build_identity["visible_source"] = identify(script)
+        (data / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
         pack(stage, relocated, wheel)
 
     (output / "bundle.json").write_text(json.dumps({

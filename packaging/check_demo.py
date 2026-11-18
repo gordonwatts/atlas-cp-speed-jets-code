@@ -86,6 +86,9 @@ def prepare(bundle: Path, result: Path, python: Path, uv: Path) -> None:
         uv_dir, "install", 5)
     record = {"python": str(python), "uv": str(uv), "script": script_name, "wheel": wheel_name,
               "wheel_sha256": manifest["wheel"]["sha256"], "script_sha256": manifest["visible_script"]["sha256"]}
+    for field in ("demo_defaults", "columnar_source", "visible_source"):
+        if field in manifest:
+            record[field] = manifest[field]
     (result / "installations.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
