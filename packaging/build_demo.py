@@ -23,7 +23,10 @@ ROOT_NAMES = (
     "libCling.so", "libMathCore.so", "libPhysics.so", "libcppyy", "libCPyCppyy",
     "libxAOD", "libJetCalibTools", "libJetUncertainties", "libAsgTools", "liblwtnn.so",
 )
-LICENSES = ("AnalysisBase-LICENSE.txt", "GCC-COPYING3", "GCC-COPYING.RUNTIME", "lwtnn-2.14.1-LICENCE")
+LICENSES = (
+    "AnalysisBase-LICENSE.txt", "GCC-COPYING3", "GCC-COPYING.RUNTIME", "lwtnn-2.14.1-LICENCE",
+    "ROOT-LICENSE", "ROOT-LGPL2_1.txt", "ROOT-adaptation-NOTICE.md",
+)
 CLEAN_ELF_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
@@ -57,7 +60,7 @@ def build_visible_script(wheel: Path, version: str, output: Path) -> None:
         "neither a provider nor a payload.",
         "Run with uv run jets_demo.py INPUT OUTPUT and keep the local wheel beside this script.\n"
         "The default evaluates all configured small- and large-R states. "
-        "The package uses the experimental Philox stream for JER.",
+        "The ROOT-free implementation preserves the deterministic positive-seed TRandom3 stream for JER.",
     )
     source = replace_once(source, "import awkward as ak",
                           "from atlas_jet_demo.runtime import DATA, PROVIDER, audit_runtime, prepare_runtime\n\n"
