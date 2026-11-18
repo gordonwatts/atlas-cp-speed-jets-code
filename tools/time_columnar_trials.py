@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import statistics
+import select
 import subprocess
 import time
 
@@ -17,10 +18,33 @@ def hashed(path):
 
 
 def snapshot():
-    return {"cpu3":next(line for line in Path("/proc/stat").read_text().splitlines() if line.startswith("cpu3 ")),
+    cpus = [line for line in Path("/proc/stat").read_text().splitlines() if line.startswith("cpu")]
+    return {"cpu3":next(line for line in cpus if line.startswith("cpu3 ")), "all_guest_cpus":cpus,
             "io_pressure":Path("/proc/pressure/io").read_text(),
             "top":subprocess.check_output(["ps","-eo","pid,psr,pcpu,comm","--sort=-pcpu"],text=True).splitlines()[:12]}
 
+
+def wait_for_child(pid):
+    seen = set()
+    samples = 0
+    fd = os.pidfd_open(pid)
+    try:
+        while True:
+            try:
+                values = dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+                              if ":" in line)
+                seen.add((int(values["Threads"]), values["Cpus_allowed_list"].strip()))
+                samples += 1
+            except FileNotFoundError:
+                pass
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if ready:
+                break
+        _, status, usage = os.wait4(pid, 0)
+    finally:
+        os.close(fd)
+    return status, usage, {"samples": samples, "states": sorted(seen),
+                           "passed": seen == {(1, "3")}}
 
 def save(path,value):
     with path.open("x") as stream:
@@ -81,17 +105,17 @@ def main(plan:Path, output:Path):
                 with (job/"run.log").open("x") as log:
                     start=time.perf_counter()
                     proc=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,cwd=root)
-                    pid,status,usage=os.wait4(proc.pid,0)
+                    status,usage,process=wait_for_child(proc.pid)
                     elapsed=time.perf_counter()-start
                     proc.returncode=os.waitstatus_to_exitcode(status)
                 record={"name":name,"scope":scope,"round":r+1,"command":command,"exit":proc.returncode,
                         "wall_s":elapsed,"cpu_s":usage.ru_utime+usage.ru_stime,"peak_rss_kB":usage.ru_maxrss,
-                        "before":before,"after":snapshot()}
+                        "before":before,"after":snapshot(),"process":process}
                 if proc.returncode==0:
                     with np.load(config["authority"][scope],allow_pickle=False) as a,np.load(result,allow_pickle=False) as c:
                         record["exact_histogram"]=set(a.files)==set(c.files) and all(np.array_equal(c[k],a[k]) for k in a.files)
                 save(job/"receipt.json",record)
-                if proc.returncode or not record["exact_histogram"]:
+                if proc.returncode or not record["exact_histogram"] or not process["passed"]:
                     raise RuntimeError(f"Unsuccessful or unequal trial {job}")
                 jobs.append(record)
     metrics={}
