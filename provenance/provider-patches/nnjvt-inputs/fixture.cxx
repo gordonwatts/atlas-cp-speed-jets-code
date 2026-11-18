@@ -269,5 +269,5 @@ int main(int argc, char** argv) {
   require(hold() == original_thread && release(), "existing slot is reusable after nested calls");
 
   require(dlclose(library) == 0, "release the fixture's extra handle");
-  std::cout << "PASS exact output, gate/exception order, nested and per-thread storage, four rounding modes and sticky flags\n";
+  std::cout << "PASS exact output, gate/exception order, nested storage and same-thread reuse, four rounding modes and sticky flags\n";
 }

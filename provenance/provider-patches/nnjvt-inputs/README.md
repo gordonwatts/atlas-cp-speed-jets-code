@@ -61,7 +61,7 @@ the rounding mode, and sticky exception-flag equality. It visits the real cut
 edges and their binary32 neighbors, the pT update cutoff, negative and signed-zero
 coordinates, subnormals and nonfinite inputs. Raw plugin calls cover gate and
 error precedence. Test-only probes hold the real lease through a nested
-evaluation, verify the same-thread fallback and separate thread ownership,
+evaluation, verify fallback and scratch restoration on the same thread,
 and check slot release during unwinding. An eight-row public batch covers
 borrowed reversed features and a broadcast input. The probes stay inside the
 fixture library. Model execution always uses the real graph.
