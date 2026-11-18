@@ -200,7 +200,7 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False,
         "pilot": pilot,
         "initial_full_file_cohort": initial,
         "scope_collections": scope.value,
-        "guest": os.uname()._asdict(),
+        "guest": dict(zip(("system", "node", "release", "version", "machine"), os.uname(), strict=True)),
         "meminfo": Path("/proc/meminfo").read_text(),
         "cpuinfo": Path("/proc/cpuinfo").read_text().split("\n\n")[0],
     }
@@ -237,19 +237,18 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False,
                     expected_small, expected_large
                 ):
                     raise ValueError(f"Unexpected observable branch coverage in {directory}")
-            if mode == "full":
+            with open_root(directory / "hist-reference.root") as counters:
+                service = counters["systematicsList"].axis().labels()
                 expected_service = expected_small | expected_large
-                if expected_small:
+                if mode == "full" and expected_small:
                     expected_service.update(manifest["service_weight_only"])
-                with open_root(directory / "hist-reference.root") as counters:
-                    service = counters["systematicsList"].axis().labels()
-                    if set(service) != expected_service:
-                        raise ValueError(f"Unexpected independently executed states in {directory}")
-                    expected_order = [state for state in manifest["service_kinematic"]
-                                      if state in expected_small | expected_large]
-                    order = [state for state in service if state not in manifest["service_weight_only"]]
-                    if order != expected_order:
-                        raise ValueError(f"Independent kinematic state order differs in {directory}")
+                if set(service) != expected_service:
+                    raise ValueError(f"Unexpected independently executed states in {directory}")
+                expected_order = [state for state in manifest["service_kinematic"]
+                                  if state in expected_small | expected_large]
+                order = [state for state in service if state not in manifest["service_weight_only"]]
+                if order != expected_order:
+                    raise ValueError(f"Independent kinematic state order differs in {directory}")
             if mode == "stored":
                 with (directory / "framework.log").open() as logfile:
                     if any("Calibration sequence:" in line for line in logfile):
