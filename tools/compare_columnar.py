@@ -193,6 +193,9 @@ def main(
     histogram_a: Annotated[Path | None, typer.Option("--histogram-a")] = None,
     histogram_c: Annotated[Path | None, typer.Option("--histogram-c")] = None,
     distributions: Annotated[Path | None, typer.Option(help="Write independent endpoint distributions in a new directory")] = None,
+    reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
+        "--reuse-nominal-nnjvt-update", help="Validate the exact-input NNJvt update reuse trial",
+    )] = False,
 ):
     """Record exact per-object, event, and status agreement for configured states."""
     execution = check_execution()
@@ -255,7 +258,8 @@ def main(
                 if recorder is not None:
                     recorder.begin_chunk()
                 for frame in evaluate_chunk(original_data, stop - start, selected, mode, states, ff_names,
-                                            nodes, buffers, diagnose=True, through=stage):
+                                            nodes, buffers, diagnose=True, through=stage,
+                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update):
                     for field, values in frame.fields.items():
                         if field in UNOBSERVED_FRAME_FIELDS:
                             continue
@@ -307,6 +311,7 @@ def main(
         "first_mismatching_stage": first_stage, "mismatching_branches_by_stage": dict(by_stage),
         "execution_failure": failure, "checks": diagnostic.checks, "histogram": histogram,
         "endpoint_distributions": endpoint_distributions,
+        "reuse_nominal_nnjvt_update": reuse_nominal_nnjvt_update,
     }
     with output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, allow_nan=False)

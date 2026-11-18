@@ -239,10 +239,41 @@ def small_jvt_inputs(source, collection, rows, prepared):
     return track_sum, jvf, vertex_kind, feature_status, scores, has_scores, passes, has_pass
 
 
-def small_jvt_selection(nodes, p4, features, state):
+class NominalNnjvtUpdate:
+    """Reuse raw update outputs for identical pT/eta input bits in one small-R chunk."""
+
+    def __init__(self, node, fixed_inputs):
+        self.node = node
+        self.fixed_inputs = fixed_inputs
+        self.nominal = None
+
+    def evaluate(self, pt, eta):
+        # Native CorrectionLib vectors arrive as float64. Comparing their
+        # IEEE representations distinguishes both signs of zero and NaN payloads.
+        pt_bits, eta_bits = pt.view(np.uint64), eta.view(np.uint64)
+        if self.nominal is None:
+            self.nominal = self.node.evaluate(pt, eta, *self.fixed_inputs)
+            self.nominal_bits = pt_bits, eta_bits
+            return self.nominal
+        nominal_pt, nominal_eta = self.nominal_bits
+        changed = (pt_bits != nominal_pt) | (eta_bits != nominal_eta)
+        if not np.any(changed):
+            return self.nominal
+        if np.all(changed):
+            return self.node.evaluate(pt, eta, *self.fixed_inputs)
+        updated = self.nominal.copy()
+        updated[changed] = self.node.evaluate(
+            pt[changed], eta[changed], *(feature[changed] for feature in self.fixed_inputs))
+        return updated
+
+
+def small_jvt_selection(nodes, p4, features, state, nominal_update=None):
     track, jvf, kind, feature_status, inherited_score, has_score, inherited_pass, has_pass = features
     pt, eta = p4[:, 0], p4[:, 1]
-    updated = nodes["small_nnjvt_update"].evaluate(pt, eta, track, jvf, kind, feature_status)
+    if nominal_update is None:
+        updated = nodes["small_nnjvt_update"].evaluate(pt, eta, track, jvf, kind, feature_status)
+    else:
+        updated = nominal_update.evaluate(pt, eta)
     if np.any(updated[:, 3] < 0):
         raise ValueError(f"NNJvt update returned an error in {state}")
     written = updated[:, 3] == 1
@@ -275,7 +306,7 @@ def small_sf(nodes, buffers, p4, selection, truth, counts, state, diagnose):
 
 
 def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buffers,
-                   diagnose=False, through="final", prepare_large_truth=False):
+                   diagnose=False, through="final", prepare_large_truth=False, reuse_nominal_nnjvt_update=False):
     stages_only = through != "final"
     if mode == Mode.stored or through == "stored":
         for prefix in selected:
@@ -357,6 +388,8 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
         nominal_jvt = None
         features = (small_jvt_inputs(source, collection, rows, prepared[1])
                     if prefix == "sr" and not stages_only else None)
+        nominal_update = (NominalNnjvtUpdate(nodes["small_nnjvt_update"], features[:4])
+                          if reuse_nominal_nnjvt_update and features is not None and mode == Mode.full else None)
         context = (truth_context(source, R10_TRUTH, buffers)
                    if prefix == "lr" and (ff_names or prepare_large_truth) and not stages_only else nullcontext())
         with context:
@@ -387,7 +420,7 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
                     if is_weight_only:
                         jvt = nominal_jvt
                     else:
-                        jvt = small_jvt_selection(nodes, p4, features, state)
+                        jvt = small_jvt_selection(nodes, p4, features, state, nominal_update)
                         if state == "NOSYS":
                             nominal_jvt = jvt
                     score, pass_decorator, selection = jvt
@@ -447,6 +480,9 @@ def main(
     matched_read: Annotated[bool, typer.Option(
         "--matched-read", help="Read the full calibrated input and prepare common truth for nominal timing controls",
     )] = False,
+    reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
+        "--reuse-nominal-nnjvt-update", help="Trial bitwise-identical nominal NNJvt update rows in full mode",
+    )] = False,
 ):
     """Histogram jets directly from the original PHYSLITE CollectionTree."""
     check_execution()
@@ -501,7 +537,8 @@ def main(
                 source = {label: arrays[name] for label, name in branches.items() if name is not None}
                 check_execution()
                 for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers,
-                                            prepare_large_truth=matched_nominal):
+                                            prepare_large_truth=matched_nominal,
+                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update):
                     if frame.state == "NOSYS":
                         objects[frame.prefix] += int(frame.counts.sum())
                     pt = frame.fields.get("hist_pt", frame.fields.get("p4pt"))
@@ -540,6 +577,8 @@ def main(
     typer.echo(f"Input branch SHA-256: {branch_digest}")
     if matched_read and mode != Mode.stored:
         typer.echo("Calibrated input plan: matched full-state reads and truth preparation")
+    if reuse_nominal_nnjvt_update:
+        typer.echo("Trial enabled: reuse nominal NNJvt update for bitwise-identical input rows")
     typer.echo(f"{events} unique events, {event_visits} event visits across {repeat} passes")
     for prefix, names in states.items():
         typer.echo(f"{prefix} {objects[prefix]} unique jets, {object_visits[prefix]} jet visits, "
