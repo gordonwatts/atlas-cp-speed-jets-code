@@ -1,0 +1,713 @@
+diff --git a/columnar/jets.py b/columnar/jets.py
+index 35b3d4f..03de70a 100644
+--- a/columnar/jets.py
++++ b/columnar/jets.py
+@@ -307,7 +307,8 @@ def small_sf(nodes, buffers, p4, selection, truth, counts, state, diagnose):
+ 
+ 
+ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buffers,
+-                   diagnose=False, through="final", prepare_large_truth=False, reuse_nominal_nnjvt_update=False):
++                   diagnose=False, through="final", prepare_large_truth=False, reuse_nominal_nnjvt_update=False,
++                   reuse_uncertainty_sign_pairs=False):
+     stages_only = through != "final"
+     if mode == Mode.stored or through == "stored":
+         for prefix in selected:
+@@ -393,16 +394,25 @@ def evaluate_chunk(source, events, selected, mode, states, ff_names, nodes, buff
+                           if reuse_nominal_nnjvt_update and features is not None and mode == Mode.full else None)
+         context = (truth_context(source, R10_TRUTH, buffers)
+                    if prefix == "lr" and (ff_names or prepare_large_truth) and not stages_only else nullcontext())
+-        with context:
++        pair_scope = (buffers.unsigned_sign_pairs(len(calibration))
++                      if reuse_uncertainty_sign_pairs and mode == Mode.full else nullcontext())
++        with context, pair_scope as pairing:
++            evaluate_state = uncertainty.evaluate
++            if pairing is not None:
++                from functools import partial
++
++                evaluate_state = partial(pairing.evaluate, evaluate_state)
+             for state in states[prefix]:
+                 is_weight_only = prefix == "sr" and state in WEIGHT_DIRECTIONS
+                 is_ff = prefix == "lr" and state in ff_names
++                if pairing is not None and (is_weight_only or is_ff):
++                    pairing.discard()
+                 if stages_only and (is_weight_only or is_ff):
+                     continue
+                 if is_ff or is_weight_only:
+                     varied = nominal
+                 else:
+-                    varied = uncertainty.evaluate(*arguments, state)
++                    varied = evaluate_state(*arguments, state)
+                     if state == "NOSYS":
+                         nominal = varied
+                 valid_combined = status_bits(varied[:, 4], varied[:, 5], f"{prefix} {state} uncertainty")
+@@ -484,6 +494,9 @@ def main(
+     reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
+         "--reuse-nominal-nnjvt-update", help="Trial bitwise-identical nominal NNJvt update rows in full mode",
+     )] = False,
++    reuse_uncertainty_sign_pairs: Annotated[bool, typer.Option(
++        "--reuse-uncertainty-sign-pairs", help="Trial the native adjacent sign-pair group aggregate",
++    )] = False,
+ ):
+     """Histogram jets directly from the original PHYSLITE CollectionTree."""
+     check_execution()
+@@ -539,7 +552,8 @@ def main(
+                 check_execution()
+                 for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers,
+                                             prepare_large_truth=matched_nominal,
+-                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update):
++                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update,
++                                            reuse_uncertainty_sign_pairs=reuse_uncertainty_sign_pairs):
+                     if frame.state == "NOSYS":
+                         objects[frame.prefix] += int(frame.counts.sum())
+                     pt = frame.fields.get("hist_pt", frame.fields.get("p4pt"))
+@@ -578,6 +592,8 @@ def main(
+     typer.echo(f"Input branch SHA-256: {branch_digest}")
+     if matched_read and mode != Mode.stored:
+         typer.echo("Calibrated input plan: matched full-state reads and truth preparation")
++    if reuse_uncertainty_sign_pairs:
++        typer.echo("Trial enabled: reuse unsigned uncertainty aggregate within adjacent state pairs")
+     if reuse_nominal_nnjvt_update:
+         typer.echo("Trial enabled: reuse nominal NNJvt update for bitwise-identical input rows")
+     typer.echo(f"{events} unique events, {event_visits} event visits across {repeat} passes")
+diff --git a/jet_transport.py b/jet_transport.py
+index c6b06dc..940d798 100644
+--- a/jet_transport.py
++++ b/jet_transport.py
+@@ -38,6 +38,15 @@ class JetBuffers:
+             if getattr(self.lib, "jets_unbind_" + name)():
+                 raise RuntimeError(self.lib.jets_buffer_error().decode())
+ 
++    @contextmanager
++    def unsigned_sign_pairs(self, rows):
++        pairing = _UnsignedSignPairs(self.lib)
++        pairing.call("jets_begin_unsigned_pairs", rows)
++        try:
++            yield pairing
++        finally:
++            pairing.call("jets_end_unsigned_pairs")
++
+     def truth(self, offsets, pt, eta, phi, mass):
+         return self._borrow("truth",offsets,np.float64,pt,eta,phi,mass)
+ 
+@@ -49,3 +58,38 @@ class JetBuffers:
+ 
+     def weights(self, offsets, weights):
+         return self._borrow("weights",offsets,np.float64,weights)
++
++class _UnsignedSignPairs:
++    def __init__(self, library):
++        if not hasattr(library, "jets_begin_unsigned_pairs"):
++            raise ValueError("The sign-pair experiment requires the opt-in compiled provider")
++        self.library = library
++        library.jets_unsigned_pair_error.argtypes = []
++        library.jets_unsigned_pair_error.restype = ct.c_char_p
++        signatures = (
++            ("jets_begin_unsigned_pairs", [ct.c_size_t]),
++            ("jets_end_unsigned_pairs", []),
++            ("jets_unsigned_pair_begin_state", []),
++            ("jets_unsigned_pair_end_state", [ct.c_int]),
++            ("jets_unsigned_pair_discard", []),
++        )
++        for name, arguments in signatures:
++            function = getattr(library, name)
++            function.argtypes, function.restype = arguments, ct.c_int
++
++    def call(self, name, *args):
++        if getattr(self.library, name)(*args):
++            raise RuntimeError(self.library.jets_unsigned_pair_error().decode())
++
++    def evaluate(self, evaluator, *args):
++        self.call("jets_unsigned_pair_begin_state")
++        completed = False
++        try:
++            values = evaluator(*args)
++            completed = True
++            return values
++        finally:
++            self.call("jets_unsigned_pair_end_state", int(completed))
++
++    def discard(self):
++        self.call("jets_unsigned_pair_discard")
+diff --git a/portable/uncertainty.cxx b/portable/uncertainty.cxx
+index e57c5f9..83d70db 100644
+--- a/portable/uncertainty.cxx
++++ b/portable/uncertainty.cxx
+@@ -7,6 +7,9 @@
+ #ifdef JETS_NOMINAL_RESOLUTION_CACHE
+ #include "nominal_resolution_cache.h"
+ #endif
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++#include "unsigned_sign_pairs.h"
++#endif
+ 
+ #include <correction_plugin.h>
+ #include <algorithm>
+@@ -47,6 +50,9 @@ struct Component {
+ 
+ struct Group {
+   bool quadrature;
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++  std::size_t ordinal;
++#endif
+   std::map<Scale, std::vector<Component>> pieces;
+ };
+ 
+@@ -93,6 +99,9 @@ struct JetUncertaintyModel::Impl {
+ #ifdef JETS_NOMINAL_RESOLUTION_CACHE
+   const std::uint64_t nominal_resolution_identity = portable::nominal_resolution_identity();
+ #endif
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++  const std::uint64_t model_id = unsigned_pairs::model_counter.fetch_add(1, std::memory_order_relaxed);
++#endif
+ 
+   explicit Impl(const correction::PluginConfig& config) {
+     rapidjson::Document p;
+@@ -116,9 +125,15 @@ struct JetUncertaintyModel::Impl {
+       if(!store.HasMember(name.c_str())) throw std::invalid_argument("Missing embedded jet table: "+name);
+       return &lookups.try_emplace(key,portable::restore_histogram(store[name.c_str()]),interp).first->second;
+     };
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++    std::size_t next_group_ordinal = 0;
++#endif
+     for(const auto& group:plan["groups"].GetObject()) {
+       const auto& g=group.value;
+       auto& dest=groups[group.name.GetString()];
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++      dest.ordinal = next_group_ordinal++;
++#endif
+       dest.quadrature=std::string(g["correlation"].GetString())=="Uncorrelated";
+       for(const auto& comp:g["components"].GetArray()) {
+         Component c;
+@@ -199,6 +214,17 @@ struct JetUncertaintyModel::Impl {
+   }
+ 
+   JetUncertaintyResult evaluate(const JetUncertaintyInput& input,const State* state) const {
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++    auto& shared = unsigned_pairs::chunk;
++    std::optional<std::size_t> row;
++    if (shared) {
++      std::optional<unsigned_pairs::StateKey> key;
++      if (state && state->group->pieces.size() == 1 && (state->sign == 1 || state->sign == -1)) {
++        key = unsigned_pairs::StateKey{model_id, state->group->ordinal, state->sign, state->pseudo};
++      }
++      row = shared->visit(key);
++    }
++#endif
+     bool pseudo=state && state->pseudo;
+     JetUncertaintyResult out{input.p4,std::nullopt,std::nullopt};
+     if(!pseudo) out.is_bjet=input.parton_truth_label==5;
+@@ -217,13 +243,22 @@ struct JetUncertaintyModel::Impl {
+         }
+       }
+       for(const auto& [scale,pieces]:group.pieces) {
+-        double uncertainty=0.0;
+-        for(const auto& c:pieces) {
+-          double v=value(c,coords,out.is_bjet.value_or(false));
+-          uncertainty+=group.quadrature && pieces.size()>1 ? std::pow(v,2) : v;
+-        }
+-        if(group.quadrature && pieces.size()>1) uncertainty=std::sqrt(uncertainty);
+-        uncertainty*=state->sign;
++        const auto unsigned_aggregate = [&] {
++          double result = 0.0;
++          for (const auto& c : pieces) {
++            const double v = value(c, coords, out.is_bjet.value_or(false));
++            result += group.quadrature && pieces.size() > 1 ? std::pow(v, 2) : v;
++          }
++          return group.quadrature && pieces.size() > 1 ? std::sqrt(result) : result;
++        };
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++        const auto cached = row ? shared->cached(*row, input) : std::nullopt;
++        const double aggregate = cached ? *cached : unsigned_aggregate();
++        if (row && !cached && std::isfinite(aggregate)) shared->record(*row, input, aggregate);
++#else
++        const double aggregate = unsigned_aggregate();
++#endif
++        const double uncertainty = aggregate * state->sign;
+         double pt_factor=1.0, mass_factor=1.0;
+         if(scale==Scale::four_vector) pt_factor=mass_factor=1.0+uncertainty;
+         else if(scale==Scale::mass) mass_factor=1.0+uncertainty;
+@@ -266,3 +301,66 @@ JetUncertaintyModel::Selected JetUncertaintyModel::select(const std::string& sys
+ }
+ #endif
+ } // namespace jets
++
++#ifdef JETS_UNSIGNED_SIGN_PAIRS
++namespace {
++
++thread_local std::string unsigned_pair_error;
++
++template <class Operation>
++int run_unsigned_pair_operation(Operation operation) {
++  try {
++    operation();
++    unsigned_pair_error.clear();
++    return 0;
++  } catch (const std::exception& error) {
++    unsigned_pair_error = error.what();
++    return 1;
++  }
++}
++
++jets::unsigned_pairs::Chunk& pair_chunk() {
++  auto& chunk = jets::unsigned_pairs::chunk;
++  if (!chunk) throw std::logic_error("No unsigned pair chunk is active");
++  return *chunk;
++}
++
++} // namespace
++
++extern "C" int jets_begin_unsigned_pairs(std::size_t rows) {
++  return run_unsigned_pair_operation([&] {
++    auto& chunk = jets::unsigned_pairs::chunk;
++    if (chunk) throw std::logic_error("Unsigned pair chunks cannot be nested");
++    chunk.emplace(rows);
++  });
++}
++
++extern "C" int jets_end_unsigned_pairs() {
++  return run_unsigned_pair_operation([] {
++    if (!pair_chunk().idle()) throw std::logic_error("Cannot close an active unsigned pair state");
++    jets::unsigned_pairs::chunk.reset();
++  });
++}
++
++extern "C" int jets_unsigned_pair_begin_state() {
++  return run_unsigned_pair_operation([] { pair_chunk().begin_state(); });
++}
++
++extern "C" int jets_unsigned_pair_end_state(int completed) {
++  return run_unsigned_pair_operation([&] {
++    if (completed != 0 && completed != 1) throw std::invalid_argument("Expected zero or one for completion");
++    pair_chunk().end_state(completed != 0);
++  });
++}
++
++extern "C" int jets_unsigned_pair_discard() {
++  return run_unsigned_pair_operation([] { pair_chunk().discard(); });
++}
++
++extern "C" std::size_t jets_unsigned_pair_hits() {
++  const auto& chunk = jets::unsigned_pairs::chunk;
++  return chunk ? chunk->hits() : 0;
++}
++
++extern "C" const char* jets_unsigned_pair_error() { return unsigned_pair_error.c_str(); }
++#endif
+diff --git a/portable/unsigned_sign_pairs.h b/portable/unsigned_sign_pairs.h
+new file mode 100644
+index 0000000..50962b5
+--- /dev/null
++++ b/portable/unsigned_sign_pairs.h
+@@ -0,0 +1,150 @@
++#pragma once
++
++#include "../provider/jet_uncertainty.h"
++
++#include <atomic>
++#include <bit>
++#include <cfenv>
++#include <cstddef>
++#include <cstdint>
++#include <new>
++#include <optional>
++#include <stdexcept>
++#include <vector>
++
++namespace jets::unsigned_pairs {
++
++inline constexpr std::size_t maximum_rows = 65536;
++inline std::atomic<std::uint64_t> model_counter{0};
++
++struct StateKey {
++  std::uint64_t model;
++  std::size_t group;
++  int sign;
++  bool pseudo;
++
++  bool operator==(const StateKey&) const = default;
++
++  bool opposite(const StateKey& other) const {
++    return model == other.model && group == other.group && pseudo == other.pseudo && sign == -other.sign;
++  }
++};
++
++inline bool same_p4(const std::array<double, 4>& a, const std::array<double, 4>& b) {
++  using Bits = std::array<std::uint64_t, 4>;
++  return std::bit_cast<Bits>(a) == std::bit_cast<Bits>(b);
++}
++
++inline bool same_inputs(const JetUncertaintyInput& a, const JetUncertaintyInput& b) {
++  return same_p4(a.p4, b.p4) &&
++         std::bit_cast<std::uint32_t>(a.average_mu) == std::bit_cast<std::uint32_t>(b.average_mu) &&
++         std::bit_cast<std::uint32_t>(a.uncertainty_npv) == std::bit_cast<std::uint32_t>(b.uncertainty_npv) &&
++         a.event_available == b.event_available && a.preselected == b.preselected &&
++         a.parton_truth_label == b.parton_truth_label && a.large_r_truth_label == b.large_r_truth_label &&
++         a.calo_scale.has_value() == b.calo_scale.has_value() &&
++         (!a.calo_scale || same_p4(*a.calo_scale, *b.calo_scale));
++}
++
++struct Row {
++  JetUncertaintyInput input;
++  double aggregate;
++};
++
++enum class Phase { idle, pending, capture, reuse, fallback };
++
++class Chunk {
++ public:
++  explicit Chunk(std::size_t rows) : rows_(rows <= maximum_rows ? rows : 0) {}
++
++  void begin_state() {
++    if (phase_ != Phase::idle) throw std::logic_error("Unsigned pair state is already active");
++    phase_ = Phase::pending;
++    visited_ = 0;
++    current_.reset();
++  }
++
++  void end_state(bool completed) {
++    if (phase_ == Phase::idle) throw std::logic_error("No unsigned pair state is active");
++    if (completed && phase_ == Phase::capture && visited_ == rows_) {
++      previous_ = current_;
++    } else {
++      previous_.reset();
++    }
++    phase_ = Phase::idle;
++  }
++
++  void discard() {
++    if (phase_ != Phase::idle) throw std::logic_error("Cannot discard an active unsigned pair state");
++    previous_.reset();
++  }
++
++  std::optional<std::size_t> visit(std::optional<StateKey> key) {
++    if (phase_ == Phase::idle) {
++      previous_.reset();
++      return std::nullopt;
++    }
++    if (phase_ == Phase::fallback) return std::nullopt;
++    if (!key || visited_ >= rows_ || std::fegetround() != FE_TONEAREST) {
++      phase_ = Phase::fallback;
++      return std::nullopt;
++    }
++    if (phase_ == Phase::pending) {
++      current_ = key;
++      phase_ = previous_ && key->opposite(*previous_) ? Phase::reuse : Phase::capture;
++      if (phase_ == Phase::capture && records_.empty()) {
++        try {
++          records_.resize(rows_);
++        } catch (const std::bad_alloc&) {
++          phase_ = Phase::fallback;
++          return std::nullopt;
++        }
++      }
++    }
++    if (current_ != key) {
++      phase_ = Phase::fallback;
++      return std::nullopt;
++    }
++    const auto row = visited_++;
++    if (phase_ == Phase::capture) records_[row].reset();
++    return row;
++  }
++
++  std::optional<double> cached(std::size_t row, const JetUncertaintyInput& input) {
++    const auto& stored = records_[row];
++    if (phase_ == Phase::reuse && stored && same_inputs(input, stored->input)) {
++      ++hits_;
++      return stored->aggregate;
++    }
++    return std::nullopt;
++  }
++
++  void record(std::size_t row, const JetUncertaintyInput& input, double value) {
++    if (phase_ == Phase::capture) records_[row] = Row{input, value};
++  }
++
++  bool idle() const noexcept { return phase_ == Phase::idle; }
++  std::size_t hits() const noexcept { return hits_; }
++
++ private:
++  std::size_t rows_;
++  std::size_t visited_ = 0;
++  std::size_t hits_ = 0;
++  Phase phase_ = Phase::idle;
++  std::optional<StateKey> previous_;
++  std::optional<StateKey> current_;
++  std::vector<std::optional<Row>> records_;
++};
++
++inline thread_local std::optional<Chunk> chunk;
++
++} // namespace jets::unsigned_pairs
++
++extern "C" {
++int jets_begin_unsigned_pairs(std::size_t rows);
++int jets_end_unsigned_pairs();
++int jets_unsigned_pair_begin_state();
++int jets_unsigned_pair_end_state(int completed);
++int jets_unsigned_pair_discard();
++std::size_t jets_unsigned_pair_hits();
++const char* jets_unsigned_pair_error();
++}
+diff --git a/tools/build-portable.sh b/tools/build-portable.sh
+index 474a683..a006d7e 100644
+--- a/tools/build-portable.sh
++++ b/tools/build-portable.sh
+@@ -21,6 +21,7 @@ for choice in "${@:4}"; do
+     rng-cache-large) jets_candidate_defines+=(-DJETS_RNG_CACHE -DJETS_RNG_CACHE_LARGE) ;;
+     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
+     large-jmr-match-cache) jets_candidate_defines+=(-DJETS_LARGE_JMR_MATCH_CACHE) ;;
++    unsigned-sign-pairs) jets_candidate_defines+=(-DJETS_UNSIGNED_SIGN_PAIRS) ;;
+     uncertainty-batch) jets_candidate_defines+=(-DJETS_UNCERTAINTY_BATCH) ;;
+     nominal-resolution-cache) jets_candidate_defines+=(-DJETS_NOMINAL_RESOLUTION_CACHE) ;;
+     fast-variable-flow) jets_candidate_defines+=(-DJETS_FAST_VARIABLE_FLOW) ;;
+diff --git a/tools/compare_columnar.py b/tools/compare_columnar.py
+index f1be546..ae1ecfe 100644
+--- a/tools/compare_columnar.py
++++ b/tools/compare_columnar.py
+@@ -197,6 +197,9 @@ def main(
+     reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
+         "--reuse-nominal-nnjvt-update", help="Validate the exact-input NNJvt update reuse trial",
+     )] = False,
++    reuse_uncertainty_sign_pairs: Annotated[bool, typer.Option(
++        "--reuse-uncertainty-sign-pairs", help="Verify the opt-in native adjacent sign-pair trial",
++    )] = False,
+ ):
+     """Record exact per-object, event, and status agreement for configured states."""
+     execution = check_execution()
+@@ -265,7 +268,8 @@ def main(
+                     recorder.begin_chunk()
+                 for frame in evaluate_chunk(original_data, stop - start, selected, mode, states, ff_names,
+                                             nodes, buffers, diagnose=True, through=stage,
+-                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update):
++                                            reuse_nominal_nnjvt_update=reuse_nominal_nnjvt_update,
++                                            reuse_uncertainty_sign_pairs=reuse_uncertainty_sign_pairs):
+                     for field, values in frame.fields.items():
+                         if field in UNOBSERVED_FRAME_FIELDS:
+                             continue
+@@ -318,6 +322,7 @@ def main(
+         "execution_failure": failure, "checks": diagnostic.checks, "histogram": histogram,
+         "endpoint_distributions": endpoint_distributions,
+         "reuse_nominal_nnjvt_update": reuse_nominal_nnjvt_update,
++        "reuse_uncertainty_sign_pairs": reuse_uncertainty_sign_pairs,
+     }
+     with output.open("x", encoding="utf-8") as stream:
+         json.dump(report, stream, indent=2, allow_nan=False)
+diff --git a/tools/test_unsigned_sign_pairs.py b/tools/test_unsigned_sign_pairs.py
+new file mode 100644
+index 0000000..9eb5c0b
+--- /dev/null
++++ b/tools/test_unsigned_sign_pairs.py
+@@ -0,0 +1,199 @@
++"""Exercise the opt-in signed-pair lease through the original CorrectionLib APIs."""
++
++import ctypes as ct
++import json
++from pathlib import Path
++import sys
++
++from columnar.jets import check_execution, native_runtime
++from correctionlib import CorrectionSet, plugins
++from exporters.jet_uncertainty import correction_def
++from jet_transport import JetBuffers
++import numpy as np
++
++
++def histogram(contents, dimensions=1):
++    axes = [{"nbins": 2, "min": 0, "max": 2000, "edges": [0, 100, 2000], "range": None}]
++    axes.extend({"nbins": 2, "min": -7, "max": 7, "edges": [], "range": None} for _ in range(dimensions - 1))
++    return {"class": f"TH{dimensions}F", "axes": axes, "content": contents, "sumw2": []}
++
++
++def model(value, invalid=False):
++    def component(table, scale="fourvec", kind="table", validity=""):
++        return {"kind": kind, "scale": scale, "param": "Pt", "mode": "None", "calo": False,
++                "labels": [], "tables": [table], "validity": validity}
++
++    def group(*components):
++        return {"correlation": "Correlated", "components": components}
++
++    groups = {
++        "shared": group(component("shape")),
++        "bflavour": group(component("shape", kind="bjes_response")),
++        "resolution": group(component("resolution", "ptresabs")),
++        "multiscale": group(component("shape"), component("resolution", "ptresabs")),
++        "guard": group(component("shape", validity="mask")),
++    }
++    states = {}
++    for name in groups:
++        for stem, pseudo in (("", False), ("-pd", True)):
++            # Deliberately arbitrary spelling and opposed parameter values.
++            states[name + stem + "/one"] = {"basename": name, "parameter": -1, "pseudo_data": pseudo}
++            states[name + stem + "/two"] = {"basename": name, "parameter": 1, "pseudo_data": pseudo}
++    states["non-unit"] = {"basename": "shared", "parameter": 2, "pseudo_data": False}
++    return {
++        "mev_to_gev": 0.001, "rng_user_seed": 0, "mc_phi_seed_multiplier": 2e5,
++        "pseudo_data_phi_seed_multiplier": 1.23e5, "mc_zero_seed": 45583453, "pseudo_data_zero_seed": 34545654,
++        "abs_eta_gluon_fraction": False, "states": states, "analysis_histograms": {},
++        "histograms": {
++            "shape": histogram([0.0, value, value * 2, 0.0]),
++            "resolution": histogram([0.0, 0.01, 0.02, 0.0]),
++            "mask": histogram([0.0, 0.0, 1.0, 0.0]),
++            "nominal": histogram([0.06] * 16, 2),
++            "file_mask": histogram([0.0] * 64, 3),
++        },
++        "portable_plan": {
++            "groups": groups, "file_validity": "file_mask" if invalid else "",
++            "ref_mu": 0, "ref_npv": 0, "smear_only_mc": False,
++            "resolutions": {"MC": {"table": "nominal", "mode": "OnlyX"},
++                            "Data": {"table": "nominal", "mode": "OnlyX"}},
++        },
++    }
++
++
++def vector(values):
++    points = np.asarray(values, dtype=np.float64)
++    return [
++        points, 0.2, 0.7123457, 12000.0,
++        np.zeros(len(points)), 23.0, np.array([1, 1, 1, 0]), np.array([1, 1, 0, 1]),
++        np.array([5, 0, 5, 0]), np.array([1, 0, 1, 1]), 0, 0,
++        0.0, 0.0, 0.0, 0.0, 0,
++    ]
++
++
++def equal(observed, expected):
++    np.testing.assert_array_equal(np.asarray(observed).view(np.uint64), np.asarray(expected).view(np.uint64))
++
++
++def main(provider, report):
++    execution = check_execution()
++    plugins.enable_discovery(False)
++    plugins.load_library(str(provider.resolve()))
++    cset = CorrectionSet.from_string(json.dumps({
++        "schema_version": 3, "corrections": [
++            correction_def("model", model(0.05)),
++            correction_def("other", model(0.15)),
++            correction_def("invalid", model(0.05, invalid=True)),
++        ],
++    }))
++    primary, other, invalid = (cset[name] for name in ("model", "other", "invalid"))
++    buffers = JetBuffers(provider)
++    buffers.lib.jets_unsigned_pair_hits.argtypes = []
++    buffers.lib.jets_unsigned_pair_hits.restype = ct.c_size_t
++    hits = buffers.lib.jets_unsigned_pair_hits
++    args = vector([80000, 120000, 250000, 500000])
++    evidence = {}
++
++    def chain(label, requests, expected_hits, rows=4):
++        control = [node.evaluate(*a, state) for node, state, a in requests]
++        with buffers.unsigned_sign_pairs(rows) as lease:
++            for (node, state, a), expected in zip(requests, control, strict=True):
++                equal(lease.evaluate(node.evaluate, *a, state), expected)
++            assert hits() == expected_hits, (label, hits(), expected_hits)
++            evidence[label] = expected_hits
++        assert hits() == 0
++
++    for family in ("shared", "bflavour", "resolution"):
++        for pseudo in ("", "-pd"):
++            names = [family + pseudo + "/" + name for name in ("one", "two")]
++            chain(family + pseudo + "/canonical", [(primary, name, args) for name in names], 2)
++            chain(family + pseudo + "/reverse", [(primary, name, args) for name in reversed(names)], 2)
++    chain("component-validity", [(primary, f"guard/{s}", args) for s in ("one", "two")], 1)
++    chain("file-validity", [(invalid, f"shared/{s}", args) for s in ("one", "two")], 0)
++    chain("multi-scale ordered fallback", [(primary, f"multiscale/{s}", args) for s in ("one", "two")], 0)
++    chain("same sign fallback", [(primary, "shared/one", args)] * 2, 0)
++    chain("non-unit sign fallback", [(primary, "non-unit", args), (primary, "shared/one", args)], 0)
++    chain("two model isolation", [(primary, "shared/one", args), (other, "shared/two", args)], 0)
++    chain("pseudo boundary", [(primary, "shared/one", args), (primary, "shared-pd/two", args)], 0)
++    chain("nonadjacent subset", [(primary, s, args) for s in ("shared/one", "NOSYS", "shared/two")], 0)
++    chain("oversized scope", [(primary, f"shared/{s}", args) for s in ("one", "two")], 0, rows=65537)
++    chain("row count mismatch", [(primary, f"shared/{s}", args) for s in ("one", "two")], 0, rows=3)
++
++    # The low-level evalv entry borrows these contiguous NumPy columns while
++    # executing. The trial must own its saved typed row and observe mutations
++    # on the next call. Change a physics input for row 0 and leave row 1 intact.
++    original = primary._base.evalv(*args, "shared/one")
++    expected = primary._base.evalv(*vector([160000, 120000, 250000, 500000]), "shared/two")
++    with buffers.unsigned_sign_pairs(4) as lease:
++        equal(lease.evaluate(primary._base.evalv, *args, "shared/one"), original)
++        args[0][0] = 160000.0
++        equal(lease.evaluate(primary._base.evalv, *args, "shared/two"), expected)
++        assert hits() == 1
++    evidence["borrowed physics mutation"] = 1
++
++    different = vector([80000, 120000, 250000, 500000])
++    different[4][0] = -0.0
++    nan = np.array([0x7fc00002], dtype=np.uint32).view(np.float32).astype(np.float64)[0]
++    args = vector([80000, 120000, 250000, 500000])
++    args[4][1] = np.array([0x7fc00001], dtype=np.uint32).view(np.float32).astype(np.float64)[0]
++    different[4][1] = nan
++    chain("signed zero and NaN payload guards",
++          [(primary, "shared/one", args), (primary, "shared/two", different)], 0)
++
++    original = vector([80000, 120000, 250000, 500000])
++    reorder = [value.copy() if isinstance(value, np.ndarray) else value for value in original]
++    reorder[0][0], reorder[0][1] = reorder[0][1], reorder[0][0]
++    chain("row order mismatch", [(primary, "shared/one", original), (primary, "shared/two", reorder)], 0)
++    empty = [value[:0] if isinstance(value, np.ndarray) else value for value in original]
++    chain("empty chunk", [(primary, "shared/one", empty), (primary, "shared/two", empty)], 0, rows=0)
++
++    rejected = list(original)
++    rejected[7] = original[7].copy()
++    rejected[7][1] = 2
++    expected = primary.evaluate(*original, "shared/two")
++    with buffers.unsigned_sign_pairs(4) as lease:
++        lease.evaluate(primary.evaluate, *original, "shared/one")
++        try:
++            lease.evaluate(primary.evaluate, *rejected, "shared/two")
++        except (ValueError, RuntimeError) as error:
++            assert "zero or one" in str(error)
++        else:
++            raise AssertionError("Invalid presence flag reached the group")
++        prior_hits = hits()
++        equal(lease.evaluate(primary.evaluate, *original, "shared/two"), expected)
++        assert hits() == prior_hits
++    evidence["partial exception clears pending state"] = True
++
++    with buffers.unsigned_sign_pairs(4) as lease:
++        lease.evaluate(primary.evaluate, *original, "shared/one")
++        lease.discard()
++        equal(lease.evaluate(primary.evaluate, *original, "shared/two"), expected)
++        assert hits() == 0
++    evidence["explicit bypass breaks pair"] = True
++
++    with buffers.unsigned_sign_pairs(4) as lease:
++        lease.evaluate(primary.evaluate, *original, "shared/one")
++        other.evaluate(*original, "shared/one")
++        equal(lease.evaluate(primary.evaluate, *original, "shared/two"), expected)
++        assert hits() == 0
++    evidence["unscoped native interleaving breaks pair"] = True
++
++    status = primary.evaluate(*original, "shared/two")
++    assert status[:, 4].tolist()[:2] == [2.0, 2.0]
++    assert status[2, 5] == 0 and status[3, 4] == 0 and status[3, 5] == 1
++    assert status[0, 6:8].tolist() == [1.0, 1.0] and status[1, 6:8].tolist() == [0.0, 1.0]
++    assert np.all(primary.evaluate(*original, "shared-pd/two")[:, 7] == 0)
++    scalar = [value[0].item() if isinstance(value, np.ndarray) else value for value in original]
++    equal(primary.evaluate(*scalar, "shared/two"), expected[0])
++    evidence["ordinary and pseudo status availability"] = True
++
++    with report.open("x") as output:
++        json.dump({"passed": True, "affinity": execution, "runtime": native_runtime(provider),
++                   "cases": evidence}, output, indent=2)
++        output.write("\n")
++    print(f"{len(evidence)} exact CorrectionLib sign-pair fixture cases passed")
++
++
++if __name__ == "__main__":
++    if len(sys.argv) != 3:
++        raise SystemExit("usage: python -m tools.test_unsigned_sign_pairs PROVIDER NEW-RECEIPT")
++    main(*map(Path, sys.argv[1:]))
+diff --git a/tools/time_columnar_trials.py b/tools/time_columnar_trials.py
+index a4b3112..68ad9af 100644
+--- a/tools/time_columnar_trials.py
++++ b/tools/time_columnar_trials.py
+@@ -125,7 +125,7 @@ def main(plan:Path, output:Path):
+         if not set(active).issubset(scopes) or not active:
+             raise ValueError(f"Invalid scope subset for {name}")
+         args = variant.get("options", [])
+-        if any(arg not in {"--reuse-nominal-nnjvt-update"} for arg in args):
++        if any(arg not in {"--reuse-nominal-nnjvt-update", "--reuse-uncertainty-sign-pairs"} for arg in args):
+             raise ValueError(f"Unsupported trial options for {name}")
+         runtime = {scope: variant_runtime(config, variant, scope) for scope in active}
+         sdk = runtime[active[0]]["sdk"]
