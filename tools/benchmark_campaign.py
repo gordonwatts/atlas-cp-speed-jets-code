@@ -1010,7 +1010,7 @@ def scoped_framework_proof(path: Path, scope: Scope, selected: Path, source: Pat
     events = record["events"]
     if (record["path"] != "B" or record["scope_collections"] != scope.value
             or record["histogram_spec_sha256"] != sha256(SPECIFICATION)
-            or not 0 < events <= EVENTS or Path(record["input"]).resolve() != source.resolve()
+            or events != EVENTS or Path(record["input"]).resolve() != source.resolve()
             or not recovery["endpoint_exact"] or recovery["process_audit_reclassified"]
             or recovery["scope"] != scope.value or recovery["events"] != events
             or Path(recovery["input"]).resolve() != source.resolve()):
@@ -1066,7 +1066,7 @@ def scoped_columnar_proof(path: Path, shipped: Path, scope: Scope, selected: Pat
                           verified_core: set, wheel: Path, script: Path) -> dict:
     proof = json.loads(path.read_text())
     if (not proof["passed"] or proof["scope"] != scope.value or proof["mode"] != "full"
-            or proof["stage_limit"] != "final" or not 0 < proof["entries_compared"] <= EVENTS
+            or proof["stage_limit"] != "final" or proof["entries_compared"] != EVENTS
             or Path(proof["authority"]).resolve() != authority
             or Path(proof["source_phySLITE"]).resolve() != source.resolve() or proof["source_file_uuid"] != source_uuid
             or sha256(Path(proof["payload"])) != sha256(selected)
@@ -1078,13 +1078,16 @@ def scoped_columnar_proof(path: Path, shipped: Path, scope: Scope, selected: Pat
     check = json.loads(shipped.read_text())
     installation = check["installation"]
     if (check["scope"] != scope.value or Path(check["original"]).resolve() != source.resolve()
-            or not 0 < check["events"] <= EVENTS or not check["all_histogram_fields_exact"]
+            or check["events"] != EVENTS or not check["all_histogram_fields_exact"]
             or not check["matched_nominal_nosys_exact"]
             or installation["wheel_sha256"] != sha256(wheel) or installation["script_sha256"] != sha256(script)):
         raise ValueError(f"Shipped scoped C acceptance differs from the timed artifact: {shipped}")
     stock = Path(check["stock_full_histogram"]["path"])
     if sha256(stock) != check["stock_full_histogram"]["sha256"]:
         raise ValueError(f"Stock histogram moved since shipped C acceptance: {stock}")
+    with np.load(stock, allow_pickle=False) as archive:
+        if archive["events"].item() != EVENTS:
+            raise ValueError(f"Scoped shipped C histogram does not cover the complete input: {stock}")
     for name in ("pip-indexed-full", "pip-indexed-nominal", "uv-indexed-full"):
         if (shipped.parent / f"{name}.exit").read_text().strip() != "0":
             raise ValueError(f"Shipped scoped C did not complete {name}")
@@ -1177,7 +1180,8 @@ def verified_projections(partition: Path, acceptance: Path, scopes: set[Scope], 
 
 
 def verify_acceptance(b: Path | None, c: Path | None, diagnostic: bool, overlay: Path,
-                      provider: Path, payload: Path, core: Path) -> dict:
+                      provider: Path, payload: Path, core: Path, *,
+                      production_input: tuple[Path, str, bool] | None = None) -> dict:
     proofs = {}
     if not diagnostic and (b is None or c is None):
         raise ValueError("Supply accepted full-file observer receipts for both converted paths")
@@ -1197,6 +1201,14 @@ def verify_acceptance(b: Path | None, c: Path | None, diagnostic: bool, overlay:
         if (proof["entries_compared"] != EVENTS or proof["scope"] != "both" or proof["mode"] != "full"
                 or proof["stage_limit"] != "final" or not proof["passed"]):
             raise ValueError(f"Incomplete or failing direct PHYSLITE verification in {c}")
+        if production_input is not None:
+            original, uuid, reuse_nnjvt = production_input
+            checked_input = proof.get("source_phySLITE")
+            if (not isinstance(checked_input, str) or Path(checked_input).resolve() != original.resolve()
+                    or proof.get("source_file_uuid") != uuid):
+                raise ValueError(f"Direct PHYSLITE verification used a different original input: {c}")
+            if proof.get("reuse_nominal_nnjvt_update", False) is not reuse_nnjvt:
+                raise ValueError(f"Direct PHYSLITE verification used a different NNJVT reuse setting: {c}")
         proofs["C"] = {"path": str(c), "sha256": sha256(c), "authority": proof["authority"],
                        "provider": proof["provider"], "payload": proof["payload"],
                        "core": proof["runtime"]["core"]}
@@ -1355,6 +1367,7 @@ def run(
         raise typer.BadParameter("Scoped payload production requires the shipped wheel")
     wheel_proof = None
     compact_defaults = frozenset()
+    reuse_nnjvt = False
     if wheel:
         wheel_proof = wheel.with_name("bundle.json")
         bundle = json.loads(wheel_proof.read_text())
@@ -1370,7 +1383,9 @@ def run(
                 or build.get("scope_index") != bundle.get("scope_index")
                 or ("visible_source" in build and build["visible_source"] != identity(physical_script))):
             raise ValueError("Production wheel and bundle default or visible-source receipts differ")
-        compact_defaults, supports_compact, supports_override = compact_contract(script_entrypoint(physical_script), bundle)
+        entry = script_entrypoint(physical_script)
+        compact_defaults, supports_compact, supports_override = compact_contract(entry, bundle)
+        reuse_nnjvt = bool(script_bool_default(entry, "reuse_nominal_nnjvt_update"))
         if scopes and not supports_compact:
             raise typer.BadParameter("The shipped script does not expose compact payload loading")
         scopes = scopes or set(compact_defaults)
@@ -1382,7 +1397,13 @@ def run(
                                      or sha256(payload) != sha256(columnar_payload)):
         raise ValueError("Faithful paths B and C must use the same native provider and payload")
 
-    proofs = verify_acceptance(b_verification, c_verification, diagnostic, overlay, provider, payload, core)
+    source = json.loads(source_verification.read_text())
+    input_spec = json.loads((ROOT / "config/jets-input.json").read_text())
+    input_file = Path(input_spec["path"])
+
+    production_input = (input_file, source["source_file_uuid"], reuse_nnjvt) if wheel else None
+    proofs = verify_acceptance(b_verification, c_verification, diagnostic, overlay, provider, payload, core,
+                               production_input=production_input)
     if c_verification:
         c_source = Path(proofs["C"]["provider"])
         c_core = Path(proofs["C"]["core"])
@@ -1394,9 +1415,6 @@ def run(
     independent_stock = source_verification.with_name("reference.root")
     if any(Path(proof["authority"]).resolve() != independent_stock for proof in proofs.values()):
         raise ValueError("Converted observers did not use the clean stock reference")
-    source = json.loads(source_verification.read_text())
-    input_spec = json.loads((ROOT / "config/jets-input.json").read_text())
-    input_file = Path(input_spec["path"])
     if (source["events"] != EVENTS or source["source_file_uuid"] != input_spec["tfile_uuid"]
             or sha256(input_file) != input_spec["sha256"]):
         raise ValueError("The clean stock verification or original PHYSLITE file differs from the frozen sample")
