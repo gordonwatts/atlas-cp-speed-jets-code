@@ -284,8 +284,12 @@ def main(
     by_stage = Counter(check["stage"] for check in failed.values())
     first_stage = next((name for name in ("identity", *STAGES) if by_stage[name]), None)
     complete = events_seen == entries
+    endpoint_distributions = recorder.comparison() if recorder is not None else None
+    if endpoint_distributions is not None:
+        endpoint_distributions["path"] = str(distributions.resolve())
     passed = (failure is None and complete and not failed and
-              (histogram is None or all(check["passed"] for check in histogram.values())))
+              (histogram is None or all(check["passed"] for check in histogram.values())) and
+              (endpoint_distributions is None or endpoint_distributions["passed"]))
     report = {
         "passed": passed, "scope": scope.value, "mode": mode.value, "stage_limit": stage,
         "source_phySLITE": str(original.resolve()), "source_file_uuid": original_uuid,
@@ -302,6 +306,7 @@ def main(
         "source_branches_read": sorted({value for value in raw.values() if value is not None}),
         "first_mismatching_stage": first_stage, "mismatching_branches_by_stage": dict(by_stage),
         "execution_failure": failure, "checks": diagnostic.checks, "histogram": histogram,
+        "endpoint_distributions": endpoint_distributions,
     }
     with output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, allow_nan=False)

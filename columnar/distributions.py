@@ -190,6 +190,28 @@ class EndpointDistributions:
             stock_counts.update(counts_by_code(stock))
             direct_counts.update(counts_by_code(kin_fields[key]))
 
+    def comparison(self):
+        summary = {}
+        for prefix, distributions in self.distributions.items():
+            for name, counter in distributions.items():
+                summary[f"{prefix}_{name}"] = {
+                    "stock_values": int(counter.stock.sum() + counter.stock_nan.sum()),
+                    "direct_values": int(counter.direct.sum() + counter.direct_nan.sum()),
+                    "different_histogram_bins": int(np.count_nonzero(counter.stock != counter.direct)),
+                    "unpaired_chunks": int(counter.unpaired_chunks.sum()),
+                    "exact_mismatches": int(counter.exact_mismatches.sum()),
+                    "max_abs_residual": float(counter.max_abs_residual.max(initial=0.0)),
+                }
+        categorical_differences = sum(
+            a != c for states in self.tallies.values() for codes in states.values() for a, c in codes.values()
+        )
+        passed = not categorical_differences and all(
+            row["stock_values"] == row["direct_values"]
+            and not (row["different_histogram_bins"] or row["unpaired_chunks"] or row["exact_mismatches"])
+            for row in summary.values()
+        )
+        return {"passed": passed, "observables": summary, "different_code_tallies": categorical_differences}
+
     def write(self, directory: Path, report_path: Path, entries, ff_names):
         directory.mkdir()
         arrays = {"entries": np.asarray(entries), "paired_residual_edges": np.asarray(RESIDUAL)}
