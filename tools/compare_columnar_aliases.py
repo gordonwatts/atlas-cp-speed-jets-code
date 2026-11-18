@@ -66,17 +66,96 @@ class Energy:
         return output
 
 
+class EnergyDistributions:
+    def __init__(self, states):
+        from columnar.distributions import Distribution, Observable
+
+        if not states:
+            raise ValueError("Energy spectra require a calibrated small-R observer comparison")
+        edges = (0, 20, 30, 40, 60, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000,
+                 3000, 4500, 7000, 10000)
+        self.states = states
+        self.index = {f"sr_e_{name}": i for i, name in enumerate(states)}
+        self.distribution = Distribution(Observable("e", "GeV", edges, 1000), states)
+        self.ranges = np.broadcast_to([np.inf, -np.inf], (len(states), 2, 2)).copy()
+
+    def fill(self, name, stock, direct, same_counts):
+        index = self.index[name]
+        self.distribution.fill(index, stock, direct, same_counts)
+        for side, values in enumerate((stock, direct)):
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                current = self.ranges[index, side]
+                current[0] = min(current[0], float(finite.min()) / 1000)
+                current[1] = max(current[1], float(finite.max()) / 1000)
+
+    def write(self, output, entries, sources, absence, proof):
+        from columnar.distributions import RESIDUAL
+
+        output.mkdir()
+        counter = self.distribution
+        arrays = {"entries": np.asarray(entries), "sr_states": np.asarray(self.states),
+                  "paired_residual_edges": np.asarray(RESIDUAL)}
+        metadata = counter.persist("sr_energy", arrays, self.states)
+        arrays["sr_energy_stock_finite_range"] = self.ranges[:, 0]
+        arrays["sr_energy_direct_finite_range"] = self.ranges[:, 1]
+        samples_per_side_equal = np.array_equal(counter.stock.sum(axis=1) + counter.stock_nan,
+                                                counter.direct.sum(axis=1) + counter.direct_nan)
+        passed = (
+            samples_per_side_equal
+            and np.array_equal(counter.stock, counter.direct)
+            and np.array_equal(counter.stock_nan, counter.direct_nan)
+            and np.array_equal(self.ranges[:, 0], self.ranges[:, 1])
+            and not (np.any(counter.unpaired_chunks) or np.any(counter.exact_mismatches))
+        )
+        with (output / "distributions.npz").open("xb") as stream:
+            np.savez(stream, **arrays)
+        with (output / "metadata.json").open("x", encoding="utf-8") as stream:
+            json.dump({
+                "passed": passed,
+                "entries": entries,
+                "kinematic_states": self.states,
+                "histogram": metadata,
+                "axes": {"counts": ["state", "bin"], "finite_range": ["state", "minimum_then_maximum"]},
+                "bin_convention": "underflow, half-open [edge[i], edge[i+1]) bins, overflow; NaN counted separately",
+                "authority_and_candidate": (
+                    "A uses the persisted float energy. C reconstructs float energy using the native operation "
+                    "on the already-proven exact per-object C four-vector representation."
+                ),
+                "proofs": sources,
+                "observer_alias_proof": str(proof.resolve()),
+                "stock_availability": absence,
+            }, stream, indent=2, allow_nan=False)
+            stream.write("\n")
+        return {"path": str(output.resolve()), "passed": passed, "states": len(self.states),
+                "values_per_side": int(counter.stock.sum() + counter.stock_nan.sum())}
+
+
+def observer_availability(keys):
+    return {
+        "large_r_energy": {"persisted": any(name == "lr_e" or name.startswith("lr_e_") for name in keys),
+                           "alternative": "per-object pt, eta, phi and mass are persisted and verified"},
+        "large_r_unmodified_auxiliary_branches": {
+            field: sum(name.startswith(f"lr_{field}_") for name in keys)
+            for field in ("d2", "tau1", "tau2", "tau3", "split12", "split23", "truthLabel")
+        },
+    }
+
+
 def main(
     proof: Path,
     output: Path,
     energy_library: Annotated[Path, typer.Option()],
     chunk: Annotated[int, typer.Option(min=1)] = 512,
     also_proof: Annotated[list[Path] | None, typer.Option(help="Proven comparison of the same stock fields")] = None,
+    energy_distributions: Annotated[Path | None, typer.Option(help="Write independently counted energy spectra")] = None,
 ):
     """Check aliases and float energy using the exact C comparison as the first leg."""
     execution = check_execution()
     if output.exists():
         raise FileExistsError(output)
+    if energy_distributions is not None and energy_distributions.exists():
+        raise FileExistsError(energy_distributions)
     proofs = {}
     report = None
     for path in [proof, *(also_proof or [])]:
@@ -98,6 +177,10 @@ def main(
     required = set(EVENT_KEYS) | mapping.keys() | {ref for refs in mapping.values() for ref in refs}
     diagnostic = Diagnostics({key: "energy" if len(refs) == 4 else "alias" for key, refs in mapping.items()})
     energy = Energy(energy_library)
+    energy_counts = None
+    if energy_distributions is not None:
+        energy_counts = EnergyDistributions(
+            [state for state in report["states"].get("sr", []) if f"sr_e_{state}" in mapping])
     entries = report["entries_compared"]
     with open_root(report["authority"]) as source:
         tree = source["analysis"]
@@ -110,6 +193,7 @@ def main(
             uncovered = persisted - covered
             unknown = covered - persisted
             raise ValueError(f"Complete observer coverage failed: {sorted(uncovered)[:8]=}, {sorted(unknown)[:8]=}")
+        availability = observer_availability(persisted)
         for start in range(0, entries, chunk):
             stop = min(start + chunk, entries)
             data = tree.arrays(sorted(required), entry_start=start, entry_stop=stop, how=dict, library="ak")
@@ -125,15 +209,22 @@ def main(
                         for other in source_fields[1:]:
                             np.testing.assert_array_equal(counts, ak.to_numpy(ak.num(other, axis=1)))
                         values = energy(source_fields)
+                        if energy_counts is not None:
+                            stored_counts = ak.to_numpy(ak.num(data[name], axis=1))
+                            energy_counts.fill(name, flatten(data[name]), values, np.array_equal(stored_counts, counts))
                     else:
                         values = flatten(first)
                 diagnostic.compare(name, data[name], values, identities, start, counts)
             check_execution()
     failures = sum(bool(item["exact_mismatches"] or item["shape_mismatch_events"])
                    for item in diagnostic.checks.values())
+    spectrum = (energy_counts.write(energy_distributions, entries, proofs, availability, output)
+                if energy_counts is not None else None)
+    passed = failures == 0 and (spectrum is None or spectrum["passed"])
     with output.open("x", encoding="utf-8") as stream:
         json.dump({
-            "passed": failures == 0, "entries": entries, "execution": execution,
+            "passed": passed, "entries": entries, "execution": execution,
+            "energy_distributions": spectrum, "stock_availability": availability,
             "authority": report["authority"], "base_comparisons": proofs,
             "observer_branches": len(diagnostic.checks),
             "complete_branches": len(report["checks"]) + len(diagnostic.checks),
@@ -146,7 +237,7 @@ def main(
         }, stream, indent=2, allow_nan=False)
         stream.write("\n")
     typer.echo(f"{entries} events, {len(mapping)} supplementary stock fields, {failures} mismatches")
-    if failures:
+    if not passed:
         raise typer.Exit(1)
 
 
