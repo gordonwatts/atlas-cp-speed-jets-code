@@ -36,6 +36,9 @@ import awkward as ak
 import hist
 import numpy as np
 import typer
+import uproot
+from uproot.source.file import MemmapSource
+from uproot.source.futures import TrivialExecutor
 
 CHECKOUT = Path(__file__).resolve().parents[1]
 if not __package__ and str(CHECKOUT) not in sys.path:
@@ -43,8 +46,8 @@ if not __package__ and str(CHECKOUT) not in sys.path:
 
 from columnar.inputs import (
     COLLECTIONS, LARGE_LABEL, LARGE_OBSERVABLES, P4_FIELDS, R4_TRUTH, R10_TRUTH,
-    branch_plan, event_rows, flatten, offsets, open_root, optional_event, optional_object,
-    pick_feature, read_chunk, read_p4, resolve_branches, sampling_features, track_counts,
+    branch_plan, event_rows, flatten, offsets, optional_event, optional_object,
+    pick_feature, read_p4, resolve_branches, sampling_features, track_counts,
 )
 
 VALID = np.uint32(0xFFFFFFFF)
@@ -433,7 +436,8 @@ def main(
     histogram_spec: Annotated[Path, typer.Option("--histogram-spec")] = CHECKOUT / "config/jet-histogram.json",
     scope: Scope = Scope.both,
     mode: Mode = Mode.nominal,
-    n: Annotated[int | None, typer.Option("-n", "--events", min=0)] = None,
+    repeat: Annotated[int, typer.Option("-n", "--repeat", min=1)] = 1,
+    n: Annotated[int | None, typer.Option("-e", "--events", min=0)] = None,
     chunk: Annotated[int | None, typer.Option("--chunk", min=1)] = None,
 ):
     """Histogram jets directly from the original PHYSLITE CollectionTree."""
@@ -446,8 +450,6 @@ def main(
     spec = json.loads(histogram_spec.read_text())
     states = select_states(mode_name, manifest, selected)
     edges = np.asarray(spec["bins_gev"], dtype=np.float64)
-    h = {prefix: create_histogram(edges, names) for prefix, names in states.items()}
-    counts = {prefix: np.zeros(len(names), dtype=np.int64) for prefix, names in states.items()}
     positions = {prefix: {state: index for index, state in enumerate(names)} for prefix, names in states.items()}
     if mode != Mode.stored:
         if provider is None or payload is None:
@@ -459,35 +461,73 @@ def main(
     ff_names = ff_states(provenance, "final", mode_name, states)
 
     plan = branch_plan(selected, mode_name)
-    with open_root(original) as root_file:
-        tree = root_file["CollectionTree"]
-        branches = resolve_branches(tree, plan)
-        events, ranges = chunk_bounds(tree.num_entries, n, chunk or spec["chunk_events"])
-        for start, stop in ranges:
-            source = read_chunk(tree, branches, start, stop)
-            check_execution()
-            for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers):
-                pt = frame.fields.get("hist_pt", frame.fields.get("p4pt"))
-                selection = frame.fields.get("selected")
-                if selection is not None:
-                    pt = pt[selection]
-                h[frame.prefix].fill(pt=pt / 1000.0, state=frame.state, weight=frame.fields.get("hist_weight"))
-                counts[frame.prefix][positions[frame.prefix][frame.state]] += len(pt)
-            check_execution()
-        file_uuid = str(root_file.file.uuid)
+    first_pass = None
+    first_objects = None
+    file_uuid = None
+    event_visits = 0
+    object_visits = {prefix: 0 for prefix in states}
+    for pass_number in range(1, repeat + 1):
+        h = {prefix: create_histogram(edges, names) for prefix, names in states.items()}
+        counts = {prefix: np.zeros(len(names), dtype=np.int64) for prefix, names in states.items()}
+        objects = {prefix: 0 for prefix in states}
 
-    results = {"edges": edges, "events": events}
-    for prefix, names in states.items():
-        results[f"{prefix}_states"] = np.asarray(names)
-        results[f"{prefix}_entries"] = counts[prefix]
-        results[f"{prefix}_sumw"] = h[prefix].values(flow=True)
-        results[f"{prefix}_sumw2"] = h[prefix].variances(flow=True)
+        with uproot.open(original, handler=MemmapSource, num_fallback_workers=1,
+                         decompression_executor=TrivialExecutor(),
+                         interpretation_executor=TrivialExecutor()) as root_file:
+            this_uuid = str(root_file.file.uuid)
+            if file_uuid is not None and this_uuid != file_uuid:
+                raise ValueError("Original PHYSLITE identity changed between complete passes")
+            file_uuid = this_uuid
+            tree = root_file["CollectionTree"]
+            branches = resolve_branches(tree, plan)
+            requested = sorted({name for name in branches.values() if name is not None})
+            events, ranges = chunk_bounds(tree.num_entries, n, chunk or spec["chunk_events"])
+            for start, stop in ranges:
+                arrays = tree.arrays(requested, entry_start=start, entry_stop=stop, how=dict, library="ak")
+                source = {label: arrays[name] for label, name in branches.items() if name is not None}
+                check_execution()
+                for frame in evaluate_chunk(source, stop - start, selected, mode_name, states, ff_names, nodes, buffers):
+                    if frame.state == "NOSYS":
+                        objects[frame.prefix] += int(frame.counts.sum())
+                    pt = frame.fields.get("hist_pt", frame.fields.get("p4pt"))
+                    selection = frame.fields.get("selected")
+                    if selection is not None:
+                        pt = pt[selection]
+                    h[frame.prefix].fill(pt=pt / 1000.0, state=frame.state, weight=frame.fields.get("hist_weight"))
+                    counts[frame.prefix][positions[frame.prefix][frame.state]] += len(pt)
+                del source, arrays, frame, pt, selection
+                check_execution()
+
+        results = {"edges": edges, "events": events}
+        for prefix, names in states.items():
+            results[f"{prefix}_states"] = np.asarray(names)
+            results[f"{prefix}_entries"] = counts[prefix]
+            results[f"{prefix}_sumw"] = h[prefix].values(flow=True)
+            results[f"{prefix}_sumw2"] = h[prefix].variances(flow=True)
+            object_visits[prefix] += objects[prefix]
+        event_visits += events
+        if repeat > 1:
+            if first_pass is None:
+                first_pass = results
+                first_objects = objects
+            else:
+                for field, original_value in first_pass.items():
+                    np.testing.assert_array_equal(results[field], original_value,
+                                                  err_msg=f"Repeated pass {pass_number}, field {field}")
+                if objects != first_objects:
+                    raise ValueError(f"Input object counts changed in pass {pass_number}")
+        typer.echo(f"Pass {pass_number}/{repeat}, {events} events, "
+                   + ", ".join(f"{prefix} {objects[prefix]} original jets" for prefix in states))
+
     with output.open("xb") as stream:
         np.savez(stream, **results)
-    typer.echo(f"{events} events from {original.name} ({file_uuid}), "
-               f"{sum(name is not None for name in branches.values())} branches")
+    typer.echo(f"{original.name} ({file_uuid}), {len(requested)} input branches")
+    typer.echo(f"{events} unique events, {event_visits} event visits across {repeat} passes")
     for prefix, names in states.items():
-        typer.echo(f"{prefix}: {len(names)} states, {counts[prefix][0]} nominal entries")
+        typer.echo(f"{prefix} {objects[prefix]} unique jets, {object_visits[prefix]} jet visits, "
+                   f"{counts[prefix][0]} nominal entries, {len(names)} states")
+        typer.echo(", ".join(names))
+    typer.echo(f"Saved the final single-pass histogram to {output}")
 
 
 if __name__ == "__main__":
