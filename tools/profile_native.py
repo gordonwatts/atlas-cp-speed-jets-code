@@ -209,6 +209,7 @@ def main(
     minimum: Annotated[float, typer.Option(min=60.0)] = 60.0,
     perf: Path = Path("/usr/bin/perf"),
     record_only: bool = False,
+    use_demo_defaults: bool = False,
 ):
     """Record native CPU stacks while profiling a complete, exact standalone workflow."""
     if scope not in ("small", "large", "both"):
@@ -221,6 +222,15 @@ def main(
         import numpy as np
 
         packaged = wheel_identity(wheel, python)
+        defaults = None
+        if use_demo_defaults:
+            manifest = json.loads(wheel.with_name("bundle.json").read_text())
+            if (digest(demo) != manifest["visible_script"]["sha256"]
+                    or packaged["sha256"] != manifest["wheel"]["sha256"]):
+                raise ValueError("Visible script or installed wheel differs from the exact shipment")
+            defaults = manifest["demo_defaults"]
+            if defaults["mode"] != "full" or defaults["scope"] != "both":
+                raise ValueError("Recorded delivery defaults differ from the complete calibrated workflow")
         with np.load(authority, allow_pickle=False) as stock:
             events = int(stock["events"])
         machine = {
@@ -248,12 +258,18 @@ def main(
             "--clockid", "CLOCK_MONOTONIC", "--timestamp", "--period", "--sample-cpu",
             "--no-inherit", "--no-buildid-cache", "--call-graph",
             "dwarf,16384", "-o", str(data), "--", str(python.absolute()), str(demo.resolve()), str(original.absolute()),
-            str(histogram), "--mode", "full", "--scope", scope, "-n", str(repeat), "--matched-read",
+            str(histogram), "-n", str(repeat),
+        ]
+        if use_demo_defaults:
+            if scope != "both":
+                command.extend(["--scope", scope])
+        else:
+            command.extend(["--mode", "full", "--scope", scope, "--matched-read",
             "--provider", packaged["native"]["libjets.so"]["path"], "--payload", packaged["data"]["jets.json"]["path"],
             "--states", packaged["data"]["jet-states.json"]["path"],
             "--histogram-spec", packaged["data"]["jet-histogram.json"]["path"],
             "--provenance", packaged["data"]["provenance.json"]["path"],
-        ]
+            ])
         write_json(output / "command.json", command)
         run = run_profile(command, env, output)
         write_json(output / "process.json", run)
@@ -272,6 +288,7 @@ def main(
         write_json(output / "recording.json", {
             "passed": True, "scope": scope, "repeat": repeat, "events_per_pass": events, "pid": run["pid"],
             "pass_ends": run["pass_ends"], "measurement": interval, "machine": machine,
+            "shipped_defaults": defaults,
             "calibration_cpu": 3, "perf_collector_cpu": 3, "calibration_threads": 1,
             "unique_objects": unique_objects, "event_visits": events * repeat,
             "object_visits": {prefix: count * repeat for prefix, count in unique_objects.items()},
