@@ -17,6 +17,43 @@ def hashed(path):
         return hashlib.file_digest(stream,"sha256").hexdigest()
 
 
+def variant_runtime(plan, variant, scope):
+    python = variant.get("python", plan.get("python"))
+    sdk = variant.get("sdk", plan.get("sdk"))
+    payload = variant["payloads"][scope]
+    provenance = variant.get("provenances", {}).get(scope, variant.get("provenance", plan.get("provenance")))
+    if not python or not provenance:
+        raise ValueError(f"Trial {scope} requires a Python and explicit payload provenance")
+    return {"python": python, "sdk": sdk, "payload": payload, "provenance": provenance}
+
+
+def runtime_environment(base, sdk):
+    env = base.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    if sdk:
+        compiler = env.get("LD_LIBRARY_PATH")
+        search = [str(Path(sdk) / "lib")]
+        if compiler:
+            search.append(compiler)
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(search)
+    return env
+
+
+def verify_script_sources(plan):
+    for filename, digest in plan.get("script_sources", {}).items():
+        if hashed(filename) != digest:
+            raise ValueError(f"Trial source drifted after plan generation: {filename}")
+
+
+def source_branch_digest(log):
+    prefix = "Input branch SHA-256: "
+    candidates = [line[len(prefix):].strip() for line in log.read_text().splitlines() if line.startswith(prefix)]
+    if len(candidates) != 1 or len(candidates[0]) != 64 or any(ch not in "0123456789abcdef" for ch in candidates[0]):
+        raise ValueError(f"Missing or malformed original branch digest in {log}")
+    return candidates[0]
+
+
 def snapshot():
     cpus = [line for line in Path("/proc/stat").read_text().splitlines() if line.startswith("cpu")]
     return {"cpu3":next(line for line in cpus if line.startswith("cpu3 ")), "all_guest_cpus":cpus,
@@ -68,6 +105,7 @@ def main(plan:Path, output:Path):
         raise ValueError("Run on the single reserved analysis CPU/thread")
     config=json.loads(plan.read_text())
     root=Path(__file__).resolve().parents[1]
+    verify_script_sources(config)
     output.mkdir(exist_ok=False)
     variants=config["variants"]
     names=list(variants)
@@ -89,15 +127,20 @@ def main(plan:Path, output:Path):
         args = variant.get("options", [])
         if any(arg not in {"--reuse-nominal-nnjvt-update"} for arg in args):
             raise ValueError(f"Unsupported trial options for {name}")
-        runtime_python = variant.get("python", config["python"])
-        sdk = variant.get("sdk", config.get("sdk"))
-        receipts[name]={"python":runtime_python, "core":hashed(Path(sdk)/"lib/libcorrectionlib.so") if sdk else None,
-                        "provider":hashed(variant["provider"]),
-                        "payloads":{scope:hashed(variant["payloads"][scope]) for scope in active}}
+        runtime = {scope: variant_runtime(config, variant, scope) for scope in active}
+        sdk = runtime[active[0]]["sdk"]
+        receipts[name] = {
+            "python": runtime[active[0]]["python"],
+            "core": hashed(Path(sdk) / "lib/libcorrectionlib.so") if sdk else None,
+            "provider": hashed(variant["provider"]),
+            "payloads": {scope: hashed(spec["payload"]) for scope, spec in runtime.items()},
+            "provenance": {scope: hashed(spec["provenance"]) for scope, spec in runtime.items()},
+        }
     save(output/"inputs.json",{"plan":config,"digests":receipts,"source_sha256":hashed(config["script"]),
                               "source_snapshot":subprocess.check_output(["git","rev-parse","HEAD"],cwd=root,text=True).strip(),
                               "starts":snapshot(),"policy":"Four rounds, first excluded. A one-round diagnostic gives no retained mean."})
     jobs=[]
+    branch_digests={}
     for r in range(rounds):
         order=scopes[r%len(scopes):]+scopes[:r%len(scopes)]
         for i,scope in enumerate(order):
@@ -111,17 +154,15 @@ def main(plan:Path, output:Path):
                 job=output/f"{r+1:02d}-{scope}-{name}"
                 job.mkdir()
                 result=job/"histogram.npz"
-                sdk = v.get("sdk", config.get("sdk"))
-                job_env = env.copy()
-                expected = {}
-                if sdk:
-                    lib_dir = Path(sdk)/"lib"
-                    job_env["LD_LIBRARY_PATH"] = str(lib_dir) + ":" + env.get("LD_LIBRARY_PATH", "")
-                    expected = {"libjets.so":v["provider"], "libcorrectionlib.so":lib_dir/"libcorrectionlib.so"}
-                command=[v.get("python",config["python"]),config["script"],config["input"],str(result.resolve()),
-                         "--provider",v["provider"],"--payload",v["payloads"][scope],
-                         "--provenance",config["provenance"],"--scope",scope,"--mode","full","--events",str(events)]
+                runtime = variant_runtime(config, v, scope)
+                sdk = runtime["sdk"]
+                job_env = runtime_environment(env, sdk)
+                expected = {"libjets.so": v["provider"], "libcorrectionlib.so": Path(sdk) / "lib/libcorrectionlib.so"} if sdk else {}
+                command=[runtime["python"],config["script"],config["input"],str(result.resolve()),
+                         "--provider",v["provider"],"--payload",runtime["payload"],
+                         "--provenance",runtime["provenance"],"--scope",scope,"--mode","full","--events",str(events)]
                 command.extend(v.get("options", []))
+                verify_script_sources(config)
                 before=snapshot()
                 with (job/"run.log").open("x") as log:
                     start=time.perf_counter()
@@ -135,8 +176,15 @@ def main(plan:Path, output:Path):
                 if proc.returncode==0:
                     with np.load(config["authority"][scope],allow_pickle=False) as a,np.load(result,allow_pickle=False) as c:
                         record["exact_histogram"]=set(a.files)==set(c.files) and all(np.array_equal(c[k],a[k]) for k in a.files)
+                if proc.returncode == 0 and config.get("require_matching_branches"):
+                    try:
+                        digest = source_branch_digest(job / "run.log")
+                        record["source_branch_sha256"] = digest
+                        record["matching_source_branches"] = branch_digests.setdefault(scope, digest) == digest
+                    except ValueError as error:
+                        record.update(matching_source_branches=False, branch_error=str(error))
                 save(job/"receipt.json",record)
-                if proc.returncode or not record["exact_histogram"] or not process["passed"]:
+                if proc.returncode or not record["exact_histogram"] or not process["passed"] or not record.get("matching_source_branches", True):
                     raise RuntimeError(f"Unsuccessful or unequal trial {job}")
                 jobs.append(record)
     metrics={}
