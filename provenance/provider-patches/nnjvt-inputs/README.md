@@ -37,8 +37,7 @@ allocations remain. No final run call rate or whole-workflow gain is inferred.
 
 From the authoritative WSL checkout, choose a fresh output and the approved
 canonical payload. Run these commands under the assigned build and fixture
-slots. The fixture uses one CPU. Main suspends while a second OS thread checks
-independent scratch ownership.
+slots. The fixture uses one CPU and one execution thread. It exercises nested leases, scratch ownership and reset after exceptions in that thread.
 
 ```bash
 variant=provenance/provider-patches/nnjvt-inputs

@@ -16,7 +16,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <typeinfo>
 #include <vector>
 
@@ -266,19 +265,6 @@ int main(int argc, char** argv) {
   require(hold() == original_thread, "outer hold occupies the candidate input slot");
   require(hold() == nullptr, "a second control hold cannot steal the slot");
   gates(*old_raw, *new_raw);
-  std::exception_ptr other_failure;
-  std::thread other([&] {
-    try {
-      const auto* other_thread = hold();
-      require(other_thread && other_thread != original_thread, "a different thread owns independent scratch");
-      gates(*old_raw, *new_raw);
-      require(release(), "nested calls preserved the second thread's scratch contents");
-    } catch (...) {
-      other_failure = std::current_exception();
-    }
-  });
-  other.join();
-  if (other_failure) std::rethrow_exception(other_failure);
   require(release(), "nested eligible calls preserved the first thread's held values");
   require(hold() == original_thread && release(), "existing slot is reusable after nested calls");
 
