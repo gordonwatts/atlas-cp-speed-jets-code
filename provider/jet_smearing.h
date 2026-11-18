@@ -9,6 +9,10 @@
 #include <algorithm>
 #include <cmath>
 
+#if defined(JETS_RNG_PREFIX) && (!defined(JETS_PORTABLE) || !defined(JETS_RNG_CACHE))
+#error "The positive-seed RNG prefix trial requires the portable Gaussian cache"
+#endif
+
 #if defined(JETS_RNG_CACHE) || defined(JETS_RNG_CACHE_DIAGNOSTICS)
 #include <array>
 #include <cstdint>
@@ -88,9 +92,14 @@ double resolution_draw(Generator& generator, long long seed, double width) {
       JETS_COUNT_RESOLUTION(cache_hits);
     } else {
       JETS_COUNT_RESOLUTION(cache_misses);
+#ifdef JETS_RNG_PREFIX
+      JETS_COUNT_RESOLUTION(standard_draws);
+      entry = {seed, generator.first_standard_normal(seed)};
+#else
       generator.SetSeed(seed);
       JETS_COUNT_RESOLUTION(standard_draws);
       entry = {seed, generator.Gaus(0.0, 1.0)};
+#endif
     }
     // ROOT's sampler returns mean + sigma * result after sampling a single
     // standard normal. The pinned builds use separate multiply and add.

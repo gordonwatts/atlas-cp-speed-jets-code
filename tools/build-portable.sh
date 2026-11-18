@@ -20,6 +20,7 @@ for choice in "${@:4}"; do
     rng-cache) jets_candidate_defines+=(-DJETS_RNG_CACHE) ;;
     rng-cache-large) jets_candidate_defines+=(-DJETS_RNG_CACHE -DJETS_RNG_CACHE_LARGE) ;;
     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
+    rng-prefix) jets_candidate_defines+=(-DJETS_RNG_PREFIX) ;;
     large-jmr-match-cache) jets_candidate_defines+=(-DJETS_LARGE_JMR_MATCH_CACHE) ;;
     nnjvt-inputs) jets_candidate_defines+=(-DJETS_NNJVT_REUSE_INPUTS) ;;
     unsigned-sign-pairs) jets_candidate_defines+=(-DJETS_UNSIGNED_SIGN_PAIRS) ;;
@@ -43,6 +44,10 @@ case " ${jets_candidate_choices[*]} " in
     fi
     rng_cache_slots=262144 ;;
 esac
+if [[ " ${jets_candidate_choices[*]} " == *" rng-prefix "* && "$rng_cache_slots" == 0 ]]; then
+  echo "The MT prefix applies to a configured Gaussian cache miss" >&2
+  exit 2
+fi
 mkdir "$root/results/build/$label"
 cd "$root/results/build/$label"
 exec > build.log 2>&1
