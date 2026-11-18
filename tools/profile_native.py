@@ -263,9 +263,17 @@ def main(
             raise ValueError(f"Histogram differs from stock: {[key for key, equal in checks.items() if not equal]}")
         if not data.is_file() or data.stat().st_size == 0:
             raise RuntimeError("No perf recording was saved")
+        unique_objects = {prefix: int(count) for prefix, count in
+                          re.findall(r"(sr|lr) (\d+) original jets", run["pass_ends"][0]["objects"])}
+        expected_prefixes = {"both": {"sr", "lr"}, "small": {"sr"}, "large": {"lr"}}[scope]
+        if unique_objects.keys() != expected_prefixes:
+            raise ValueError(f"Unexpected complete-pass object counts: {unique_objects}")
         write_json(output / "recording.json", {
             "passed": True, "scope": scope, "repeat": repeat, "events_per_pass": events, "pid": run["pid"],
             "pass_ends": run["pass_ends"], "measurement": interval, "machine": machine,
+            "calibration_cpu": 3, "perf_collector_cpu": 3, "calibration_threads": 1,
+            "unique_objects": unique_objects, "event_visits": events * repeat,
+            "object_visits": {prefix: count * repeat for prefix, count in unique_objects.items()},
             "original": {"path": str(original.absolute()), "bytes": original.stat().st_size},
             "demo": {"path": str(demo.resolve()), "sha256": digest(demo.resolve())},
             "stock_histogram": {"path": str(authority.resolve()), "sha256": digest(authority)},

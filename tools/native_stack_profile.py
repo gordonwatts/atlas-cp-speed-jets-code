@@ -168,6 +168,19 @@ def summarize_samples(lines, recording):
         "owner": stage, "scope": SCOPE.get(stage, "infrastructure/unknown"),
         "samples": by_stage_count[stage], "period_ns": weight, "percent_of_window": 100.0 * weight / total,
     } for stage, weight in by_stage.most_common()]
+    by_dso = defaultdict(Counter)
+    for (dso, symbol), weight in self_weights.items():
+        by_dso[dso][symbol] += weight
+    libraries = [
+        {"dso": dso, "period_ns": weight, "percent_of_window": 100.0 * weight / total,
+         "examples": [{"symbol": symbol, "period_ns": ticks}
+                      for symbol, ticks in by_dso[dso].most_common(5)]}
+        for dso, weight in sorted(((dso, sum(parts.values())) for dso, parts in by_dso.items()),
+                                  key=lambda row: -row[1])
+    ]
+    stages_by_scope = Counter()
+    for row in owners:
+        stages_by_scope[row["scope"]] += row["period_ns"]
     stage_tables = {}
     for stage, stage_period in by_stage.items():
         stage_tables[stage] = {}
@@ -186,6 +199,8 @@ def summarize_samples(lines, recording):
     return {
         "samples": dict(counts), "parse_defects": dict(defects), "resolved_frame_depth_histogram": dict(resolved_depth),
         "denominator_period_ns": total, "owners": owners, "self": rows(self_weights, total),
+        "self_by_dso": libraries,
+        "owner_scope_percent": {scope: 100.0 * ns / total for scope, ns in stages_by_scope.items()},
         "inclusive": rows(inclusive_weights, total), "within_owner": stage_tables, "concrete_provider_stacks": examples,
         "stack_weights": stack_weights,
     }
