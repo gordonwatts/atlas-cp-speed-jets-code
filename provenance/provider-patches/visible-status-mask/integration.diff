@@ -1,0 +1,42 @@
+--- a/columnar/jets.py
++++ b/columnar/jets.py
+@@ -176,10 +176,12 @@
+     return {f"{stage}{field}": values[:, index] for index, field in enumerate(P4_FIELDS)}
+ 
+ 
+-def status_bits(status, present, describe):
++def status_bits(status, present, describe, *, materialize=True):
+     has_status = np.asarray(present, dtype=bool)
+     if np.any(has_status & ((status != 1) & (status != 2))):
+         raise ValueError(f"{describe} returned a release correction error")
++    if not materialize:
++        return None
+     return np.where(has_status, np.where(status == 2, VALID, OUT_OF_VALIDITY), 0).astype(np.uint32)
+ 
+ 
+@@ -415,7 +417,8 @@
+                     varied = evaluate_state(*arguments, state)
+                     if state == "NOSYS":
+                         nominal = varied
+-                valid_combined = status_bits(varied[:, 4], varied[:, 5], f"{prefix} {state} uncertainty")
++                valid_combined = status_bits(varied[:, 4], varied[:, 5], f"{prefix} {state} uncertainty",
++                                             materialize=diagnose)
+                 p4 = varied[:, :4]
+                 if diagnose and not (is_ff or is_weight_only):
+                     intermediate = p4_fields("uncert", p4)
+@@ -443,11 +446,13 @@
+                     elif diagnose:
+                         fields.pop("jvtValidity", None)
+                 else:
+-                    jmr_validity = np.zeros(len(p4), dtype=np.uint32)
+                     if is_ff:
+                         ff = nodes["large_jmr"].evaluate(*p4.T, large_truth_label, large_label_present, state, rows)
+                         p4 = ff[:, :4]
+-                        jmr_validity = status_bits(ff[:, 4], ff[:, 5], f"{prefix} {state} JMR")
++                        jmr_validity = status_bits(ff[:, 4], ff[:, 5], f"{prefix} {state} JMR",
++                                                   materialize=diagnose)
++                    elif diagnose:
++                        jmr_validity = np.zeros(len(p4), dtype=np.uint32)
+                     selection = nodes["large_selection"].evaluate(*p4.T)
+                     fields["selected"] = selection[:, 2].astype(bool)
+                     if diagnose:
