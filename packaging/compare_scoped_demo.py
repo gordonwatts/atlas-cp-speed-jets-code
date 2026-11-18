@@ -161,6 +161,8 @@ def measure(
     events: Annotated[int, typer.Option(min=0)] = 0,
     rounds: Annotated[int, typer.Option(min=4)] = 4,
     verify_projection_identity: bool = False,
+    canonical_and_indexed: bool = False,
+    stock_histogram: Path | None = None,
 ) -> None:
     """Measure fresh canonical, prebuilt and reconstructed document startup through one script."""
     require_cpu()
@@ -179,6 +181,8 @@ def measure(
         "prebuilt": ["--payload", str(prebuilt)],
         "indexed": ["--compact-payload"],
     }
+    if canonical_and_indexed:
+        options.pop("prebuilt")
     names = list(options)
     grouped = {variant: [] for variant in options}
     authority = None
@@ -204,6 +208,8 @@ def measure(
             elif selected != branches:
                 raise ValueError("The load choice changed the selected input branches")
             compare(authority, histogram)
+            if stock_histogram is not None:
+                compare(stock_histogram, histogram)
             grouped[variant].append(result)
     record(output / "summary.json", {
         "installation": frozen,
@@ -213,6 +219,7 @@ def measure(
         "branch_digest": branches,
         "projection_identities": projections,
         "all_histograms_exact": True,
+        "independent_stock": {"path": str(stock_histogram.resolve()), "sha256": digest(stock_histogram)} if stock_histogram else None,
         "prebuilt_payload": {"path": str(prebuilt), **manifest["artifacts"][relative]},
         "includes_private_temporary_file_construction": ["indexed"],
         "quality": {variant: check_quality(rows) for variant, rows in grouped.items()},
