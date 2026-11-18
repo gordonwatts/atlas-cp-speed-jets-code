@@ -1,0 +1,86 @@
+From bfeaa512c4ce4fcfcc3ece6e5e55208d49013b73 Mon Sep 17 00:00:00 2001
+From: Gordon Watts <gwatts@uw.edu>
+Date: Fri, 13 Nov 2026 03:47:57 -0800
+Subject: [PATCH] Parse correction JSON with full binary64 precision
+
+---
+ src/correction.cc            |  6 +++---
+ tests/test_json_precision.py | 36 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 3 deletions(-)
+ create mode 100644 tests/test_json_precision.py
+
+diff --git a/src/correction.cc b/src/correction.cc
+index 2f9ade2..da4d326 100644
+--- a/src/correction.cc
++++ b/src/correction.cc
+@@ -783,14 +783,14 @@ std::unique_ptr<CorrectionSet> CorrectionSet::from_file(const std::string& fn) {
+ #ifdef WITH_ZLIB
+     gzFile_s* fpz = gzopen(fn.c_str(), "r");
+     rapidjson::GzFileReadStream is(fpz, readBuffer, sizeof(readBuffer));
+-    ok = json.ParseStream<rapidjson::kParseNanAndInfFlag>(is);
++    ok = json.ParseStream<rapidjson::kParseNanAndInfFlag | rapidjson::kParseFullPrecisionFlag>(is);
+     gzclose(fpz);
+ #else
+     throw std::runtime_error("Gzip-compressed JSON files are only supported if ZLIB is found when the package is built");
+ #endif
+   } else {
+     rapidjson::FileReadStream is(fp, readBuffer, sizeof(readBuffer));
+-    ok = json.ParseStream<rapidjson::kParseNanAndInfFlag>(is);
++    ok = json.ParseStream<rapidjson::kParseNanAndInfFlag | rapidjson::kParseFullPrecisionFlag>(is);
+     fclose(fp);
+   }
+   if (!ok) {
+@@ -805,7 +805,7 @@ std::unique_ptr<CorrectionSet> CorrectionSet::from_file(const std::string& fn) {
+ 
+ std::unique_ptr<CorrectionSet> CorrectionSet::from_string(const char * data) {
+   rapidjson::Document json;
+-  rapidjson::ParseResult ok = json.Parse<rapidjson::kParseNanAndInfFlag>(data);
++  rapidjson::ParseResult ok = json.Parse<rapidjson::kParseNanAndInfFlag | rapidjson::kParseFullPrecisionFlag>(data);
+   if (!ok) {
+     throw std::runtime_error(
+         std::string("JSON parse error: ") + rapidjson::GetParseError_En(ok.Code())
+diff --git a/tests/test_json_precision.py b/tests/test_json_precision.py
+new file mode 100644
+index 0000000..0c0f125
+--- /dev/null
++++ b/tests/test_json_precision.py
+@@ -0,0 +1,36 @@
++import gzip
++import sys
++
++import pytest
++
++import correctionlib._core as core
++
++
++@pytest.mark.parametrize("reader", ["string", "file", "gzip"])
++def test_constant_full_precision(reader, tmp_path):
++    # Keep the decimal text literal: serializing a Python float could change it.
++    payload = """{
++        "schema_version": 2,
++        "corrections": [{
++            "name": "precision", "version": 1, "inputs": [],
++            "output": {"name": "value", "type": "real"},
++            "data": 101.32762799999999
++        }]
++    }"""
++    if reader == "string":
++        cset = core.CorrectionSet.from_string(payload)
++    else:
++        if reader == "gzip":
++            if sys.platform.startswith("win"):
++                pytest.skip("gzip reader requires a build with ZLIB")
++            path = tmp_path / "precision.json.gz"
++            with gzip.open(path, "wt") as stream:
++                stream.write(payload)
++        else:
++            path = tmp_path / "precision.json"
++            path.write_text(payload)
++        cset = core.CorrectionSet.from_file(str(path))
++
++    # Correctly rounded binary64; the default RapidJSON path is one ULP higher.
++    expected = float.fromhex("0x1.954f7db6e503fp+6")
++    assert cset["precision"].evaluate() == expected
+-- 
+2.39.3
+
