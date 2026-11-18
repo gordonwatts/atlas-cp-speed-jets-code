@@ -30,6 +30,8 @@ struct Axis {
   double low;
   double high;
   std::vector<double> edges;
+  int first=0, last=0;
+  bool restricted=false;
 };
 
 Axis read_axis(const Json& value) {
@@ -49,6 +51,14 @@ Axis read_axis(const Json& value) {
   }
   if (!axis.edges.empty() && (axis.edges.front() != axis.low || axis.edges.back() != axis.high))
     throw std::invalid_argument("histogram axis limits disagree");
+  if (value.HasMember("range") && !value["range"].IsNull()) {
+    const auto& range=value["range"];
+    if (!range.IsArray() || range.Size()!=2 || !range[0].IsInt() || !range[1].IsInt())
+      throw std::invalid_argument("invalid ROOT axis range");
+    axis.first=range[0].GetInt();
+    axis.last=range[1].GetInt();
+    axis.restricted=true;
+  }
   return axis;
 }
 
@@ -99,6 +109,10 @@ std::unique_ptr<TH1> jets::restore_histogram(const rapidjson::Value& data) {
   std::array<TAxis*, 3> target{hist->GetXaxis(), hist->GetYaxis(), hist->GetZaxis()};
   for (size_t a = 0; a < axes.size(); ++a) {
     if (!axes[a].edges.empty()) target[a]->Set(axes[a].bins, axes[a].edges.data());
+    if (axes[a].restricted) {
+      target[a]->SetRange(axes[a].first,axes[a].last);
+      target[a]->SetBit(TAxis::kAxisRange);
+    }
   }
   hist->Sumw2(!sumw2.Empty());
   for (unsigned i = 0; i < cells; ++i) {
