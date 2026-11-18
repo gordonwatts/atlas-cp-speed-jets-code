@@ -1,0 +1,195 @@
+{
+  "variants": {
+    "base": {
+      "build": "results/build/rng-prefix-off-trial-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow"
+      ],
+      "scopes": [
+        "small",
+        "large",
+        "both"
+      ],
+      "signed": false
+    },
+    "dormant": {
+      "build": "results/build/final-native-sign-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs"
+      ],
+      "scopes": [
+        "small",
+        "large",
+        "both"
+      ],
+      "signed": false
+    },
+    "signed": {
+      "build": "results/build/final-native-sign-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs"
+      ],
+      "scopes": [
+        "small",
+        "both"
+      ],
+      "signed": true
+    },
+    "prefix": {
+      "build": "results/build/final-native-prefix-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix"
+      ],
+      "scopes": [
+        "small",
+        "both"
+      ],
+      "signed": true
+    },
+    "prefix-large": {
+      "build": "results/build/final-native-prefix-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "rng-prefix"
+      ],
+      "scopes": [
+        "large"
+      ],
+      "signed": false
+    },
+    "index": {
+      "build": "results/build/final-native-axis-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "variable-axis-index"
+      ],
+      "scopes": [
+        "small",
+        "both"
+      ],
+      "signed": true
+    },
+    "index-large": {
+      "build": "results/build/final-native-axis-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "variable-axis-index"
+      ],
+      "scopes": [
+        "large"
+      ],
+      "signed": false
+    },
+    "truth": {
+      "build": "results/build/final-native-r10-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "large-jmr-match-cache"
+      ],
+      "scopes": [
+        "both"
+      ],
+      "signed": true
+    },
+    "truth-large": {
+      "build": "results/build/final-native-r10-001",
+      "flags": [
+        "rng-cache-large",
+        "fast-variable-flow",
+        "unsigned-sign-pairs",
+        "large-jmr-match-cache"
+      ],
+      "scopes": [
+        "large"
+      ],
+      "signed": false
+    }
+  },
+  "comparisons": {
+    "compiled-interface": {
+      "control": "base",
+      "candidate": "dormant",
+      "scopes": [
+        "small",
+        "large",
+        "both"
+      ]
+    },
+    "signed-usage": {
+      "control": "dormant",
+      "candidate": "signed",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    },
+    "signed-net": {
+      "control": "base",
+      "candidate": "signed",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    },
+    "prefix": {
+      "control": "signed",
+      "candidate": "prefix",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    },
+    "prefix-large": {
+      "control": "dormant",
+      "candidate": "prefix-large",
+      "scopes": [
+        "large"
+      ]
+    },
+    "index": {
+      "control": "signed",
+      "candidate": "index",
+      "scopes": [
+        "small",
+        "both"
+      ]
+    },
+    "index-large": {
+      "control": "dormant",
+      "candidate": "index-large",
+      "scopes": [
+        "large"
+      ]
+    },
+    "truth": {
+      "control": "signed",
+      "candidate": "truth",
+      "scopes": [
+        "both"
+      ]
+    },
+    "truth-large": {
+      "control": "dormant",
+      "candidate": "truth-large",
+      "scopes": [
+        "large"
+      ]
+    }
+  }
+}
