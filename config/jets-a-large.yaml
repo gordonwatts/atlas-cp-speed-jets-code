@@ -1,0 +1,31 @@
+CommonServices:
+  systematicsHistogram: systematicsList
+  separateWeightSystematics: true
+Jets:
+- containerName: LargeR
+  jetCollection: AntiKt10UFOCSSKSoftDropBeta100Zcut10Jets
+  recalibratePhyslite: true
+  runTruthJetTagging: true
+  runGhostMuonAssociation: false
+  runUncertainties: true
+  systematicsModelJER: Full
+  systematicsModelJMS: Full
+  systematicsModelJMR: Full
+  runJERsystematicsOnData: false
+  minPt: 200000.0
+  maxPt: 3000000.0
+  maxEta: 0.0
+  maxRapidity: 2.0
+  minMass: 40000.0
+  maxMass: 600000.0
+Output:
+  treeName: analysis
+  storeSelectionFlags: false
+  containers:
+    lr_: LargeR
+  commands:
+  - optional disable .*
+  - enable ^lr_pt$
+  vars:
+  - LargeR_%SYS%.selectPtEta -> lr_selectPtEta_%SYS% type=uint32
+  - LargeR_%SYS%.selectMass -> lr_selectMass_%SYS% type=uint32

@@ -3,6 +3,10 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 result=$(realpath -m "$1")
 events=$2
+if [[ $# -gt 3 ]] || [[ $# -eq 3 && $3 != --stats ]]; then
+  echo "Usage: $0 RESULT_DIR EVENTS [--stats]" >&2
+  exit 2
+fi
 mkdir "$result"
 (
   set +u
@@ -23,8 +27,10 @@ mkdir "$result"
     git -C "$root" rev-parse HEAD
   } > environment.txt
   args=(-i "$JETS_REFERENCE_INPUT" -t "$root/config/jets-observer.yaml"
-        -o reference.root -e "$events" --direct-driver --merge-output-files
-        --run-perf-stat --algorithm-timers)
+        -o reference.root -e "$events" --direct-driver)
+  if [[ $# -eq 3 ]]; then
+    args+=(--run-perf-stat --algorithm-timers)
+  fi
   printf 'taskset -c 3 CPRun.py ' > command.txt
   printf '%q ' "${args[@]}" >> command.txt
   printf '\n' >> command.txt

@@ -15,7 +15,6 @@ packaging==26.3
 pydantic==2.14.3
 pydantic_core==2.50.4
 Pygments==2.21.0
-PyYAML==6.0.3
 rich==15.0.0
 shellingham==1.5.4
 typer==0.29.1

@@ -1,5 +1,6 @@
 """Read the stock AnalysisBase jet ntuple and write the pT-by-systematic histograms."""
 
+from enum import Enum
 import json
 from pathlib import Path
 
@@ -14,6 +15,12 @@ from uproot.source.futures import TrivialExecutor
 APP = typer.Typer(no_args_is_help=True)
 SELECTION_ACCEPT = np.uint32(0xFFFFFFFF)
 SELECTION_REJECT = np.uint32(0xFFFFFFFE)
+
+
+class Scope(str, Enum):
+    small = "small"
+    large = "large"
+    combined = "combined"
 
 
 def open_root(path: Path):
@@ -83,16 +90,21 @@ def flatten(array: ak.Array) -> np.ndarray:
 
 @APP.command("histogram")
 def write_histogram(
-    ntuple: Path, inventory_file: Path, specification: Path, output: Path, mode: str
+    ntuple: Path, inventory_file: Path, specification: Path, output: Path, mode: str,
+    scope: Scope = Scope.combined,
 ) -> None:
     """Reread stock pT, scale factor and selection vectors, then save both histograms."""
     manifest = json.loads(inventory_file.read_text())
     spec = json.loads(specification.read_text())
     edges = np.asarray(spec["bins_gev"], dtype=np.float64)
     small_states, large_states = choose_names(mode, manifest)
+    if scope == Scope.small:
+        large_states = []
+    if scope == Scope.large:
+        small_states = []
     small_kin = set(manifest["sr_p4"])
-    small = new_histogram(edges, small_states)
-    large = new_histogram(edges, large_states)
+    small = new_histogram(edges, small_states) if small_states else None
+    large = new_histogram(edges, large_states) if large_states else None
     small_entries = np.zeros(len(small_states), dtype=np.int64)
     large_entries = np.zeros(len(large_states), dtype=np.int64)
 
@@ -133,14 +145,30 @@ def write_histogram(
 
         events = tree.num_entries
 
+    output_data = {"edges": edges, "events": events}
+    for prefix, states, entries, filled in (
+        ("sr", small_states, small_entries, small), ("lr", large_states, large_entries, large)
+    ):
+        if filled is not None:
+            output_data[f"{prefix}_states"] = np.asarray(states)
+            output_data[f"{prefix}_entries"] = entries
+            output_data[f"{prefix}_sumw"] = filled.values(flow=True)
+            output_data[f"{prefix}_sumw2"] = filled.variances(flow=True)
     with output.open("xb") as stream:
-        np.savez(
-            stream, edges=edges, events=events,
-            sr_states=np.asarray(small_states), sr_entries=small_entries,
-            sr_sumw=small.values(flow=True), sr_sumw2=small.variances(flow=True),
-            lr_states=np.asarray(large_states), lr_entries=large_entries,
-            lr_sumw=large.values(flow=True), lr_sumw2=large.variances(flow=True),
-        )
+        np.savez(stream, **output_data)
+
+
+@APP.command()
+def compare(scoped: Path, combined: Path, nominal_only: bool = False) -> None:
+    """Verify a collection histogram agrees exactly with its combined-job counterpart."""
+    with np.load(scoped) as one, np.load(combined) as many:
+        if not set(one.files) <= set(many.files):
+            raise ValueError("The combined file omits a collection present in the independent file")
+        for field in one.files:
+            expected = many[field]
+            if nominal_only and field not in ("edges", "events"):
+                expected = expected[..., :1]
+            np.testing.assert_array_equal(one[field], expected, err_msg=field)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import time
 import numpy as np
 import typer
 
-from workflow import open_root
+from workflow import Scope, branch_states, open_root
 
 APP = typer.Typer(add_completion=False)
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,26 +74,30 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
     before = sample_activity()
     with (directory / f"{label}.log").open("wb") as log:
         start_ns = time.monotonic_ns()
+        controller_start_ns = time.process_time_ns()
         worker = subprocess.Popen(["taskset", "-c", str(CPU), *command], cwd=directory,
                                   stdout=log, stderr=subprocess.STDOUT, env=env)
         status = None
         sample = 0
         while status is None:
-            sample_worker(worker.pid, threads, cpus, libraries, children, sample % 20 == 0)
+            if sample % 20 == 0:
+                sample_worker(worker.pid, threads, cpus, libraries, children, sample % 100 == 0)
             sample += 1
             pid, code, usage = os.wait4(worker.pid, os.WNOHANG)
             if pid:
                 end_ns = time.monotonic_ns()
+                controller_end_ns = time.process_time_ns()
                 status = os.waitstatus_to_exitcode(code)
                 break
-            time.sleep(0.025)
+            time.sleep(0.005)
         worker.returncode = status
     after = sample_activity()
     # Initial samples can precede taskset. Only post-affinity configuration is
     # used to judge worker threading. The wrapper is itself pinned by the CLI.
     result = {
-        "argv": command,
+        "argv": ["taskset", "-c", str(CPU), *command],
         "wall_s": (end_ns - start_ns) / 1e9,
+        "controller_cpu_s": (controller_end_ns - controller_start_ns) / 1e9,
         "cpu_user_s": usage.ru_utime,
         "cpu_sys_s": usage.ru_stime,
         "peak_rss_kb": usage.ru_maxrss,
@@ -120,6 +124,8 @@ def check_pair(nominal: Path, full: Path) -> None:
         np.testing.assert_array_equal(one["edges"], many["edges"])
         np.testing.assert_array_equal(one["events"], many["events"])
         for prefix in ("sr", "lr"):
+            if f"{prefix}_states" not in one:
+                continue
             assert one[f"{prefix}_states"].tolist() == ["NOSYS"]
             names_full = many[f"{prefix}_states"].tolist()
             assert names_full[0] == "NOSYS"
@@ -147,12 +153,15 @@ def check_quality(records: list[dict]) -> dict:
 
 
 @APP.command()
-def run(result: Path, events: int = EVENTS, pilot: bool = False) -> None:
+def run(result: Path, events: int = EVENTS, pilot: bool = False,
+        initial: bool = False, scope: Scope = Scope.combined) -> None:
     """Run four interleaved repetitions or an explicitly untimed correctness pilot."""
     result = result.resolve()
     result.mkdir()
     if os.sched_getaffinity(0) != {CPU}:
         raise ValueError(f"Launch the benchmark driver with taskset -c {CPU}")
+    if pilot and initial:
+        raise ValueError("A pilot and an initial full-file cohort are separate")
     if not pilot and events != EVENTS:
         raise ValueError(f"The production timing scope is {EVENTS} events")
     if len(list(Path("/proc/self/task").iterdir())) != 1:
@@ -174,6 +183,7 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False) -> None:
     spec = ROOT / "config/jet-histogram.json"
     provenance = {
         "input": framework_env["JETS_REFERENCE_INPUT"],
+        "input_sha256": json.loads((ROOT / "config/jets-input.json").read_text())["sha256"],
         "events": events,
         "cpu": CPU,
         "thread_caps": limits,
@@ -183,8 +193,13 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False) -> None:
         "git_commit": subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip(),
         "clock": "monotonic wall including process startup, initialization, I/O, serialization and exit",
         "scope": "framework writes unmerged stock ntuple; separate histogram process opens that ntuple",
-        "cache_policy": "warm filesystem/CVMFS; exclude the first run in each mode",
+        "cache_policy": "warm filesystem/CVMFS",
+        "exclude_first_run_per_mode": not (pilot or initial),
+        "pid_sampling_s": 0.1,
+        "exit_polling_s": 0.005,
         "pilot": pilot,
+        "initial_full_file_cohort": initial,
+        "scope_collections": scope.value,
         "guest": os.uname()._asdict(),
         "meminfo": Path("/proc/meminfo").read_text(),
         "cpuinfo": Path("/proc/cpuinfo").read_text().split("\n\n")[0],
@@ -192,12 +207,14 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False) -> None:
     (result / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     measurements = {mode: defaultdict(list) for mode in MODES}
     prior_hashes = {}
-    for round_index in range(1 if pilot else REPETITIONS):
+    for round_index in range(1 if pilot or initial else REPETITIONS):
         output = {}
         for mode in MODES[round_index % 3:] + MODES[:round_index % 3]:
             directory = result / f"{round_index + 1:02d}-{mode}"
             directory.mkdir()
-            config = ROOT / "config" / ("jets-stored.yaml" if mode == "stored" else "jets-a.yaml")
+            stem = "jets-stored" if mode == "stored" else "jets-a"
+            suffix = "" if scope == Scope.combined else f"-{scope.value}"
+            config = ROOT / "config" / f"{stem}{suffix}.yaml"
             cmd = [str(release / "bin/CPRun.py"), "-i", provenance["input"], "-t", str(config),
                    "-o", "reference.root", "-e", str(events), "--direct-driver"]
             if mode == "nominal":
@@ -205,11 +222,41 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False) -> None:
             frame = run_leg(cmd, framework_env, directory, "framework")
             ntuple = directory / "reference.root"
             with open_root(ntuple) as root_file:
-                if root_file["analysis"].num_entries != events:
+                tree = root_file["analysis"]
+                if tree.num_entries != events:
                     raise RuntimeError(f"Incomplete framework output in {directory}")
+                branches = set(tree.keys())
+                manifest = json.loads(inventory.read_text())
+                expected_small = set(manifest["sr_p4"] if mode == "full" else ["NOSYS"])
+                expected_large = set(manifest["lr_histogram"] if mode == "full" else ["NOSYS"])
+                if scope == Scope.large:
+                    expected_small = set()
+                elif scope == Scope.small:
+                    expected_large = set()
+                if (branch_states(branches, "sr_pt_"), branch_states(branches, "lr_pt_")) != (
+                    expected_small, expected_large
+                ):
+                    raise ValueError(f"Unexpected observable branch coverage in {directory}")
+            if mode == "full":
+                expected_service = expected_small | expected_large
+                if expected_small:
+                    expected_service.update(manifest["service_weight_only"])
+                with open_root(directory / "hist-reference.root") as counters:
+                    service = counters["systematicsList"].axis().labels()
+                    if set(service) != expected_service:
+                        raise ValueError(f"Unexpected independently executed states in {directory}")
+                    expected_order = [state for state in manifest["service_kinematic"]
+                                      if state in expected_small | expected_large]
+                    order = [state for state in service if state not in manifest["service_weight_only"]]
+                    if order != expected_order:
+                        raise ValueError(f"Independent kinematic state order differs in {directory}")
+            if mode == "stored":
+                with (directory / "framework.log").open() as logfile:
+                    if any("Calibration sequence:" in line for line in logfile):
+                        raise ValueError(f"Stored-object control ran a calibration in {directory}")
             output[mode] = directory / "histograms.npz"
             hist = run_leg([str(python), str(histogrammer), "histogram", str(ntuple), str(inventory),
-                            str(spec), str(output[mode]), mode], stand_env, directory, "histogram")
+                            str(spec), str(output[mode]), mode, "--scope", scope.value], stand_env, directory, "histogram")
             measurements[mode]["framework"].append(frame)
             measurements[mode]["histogram"].append(hist)
             measurements[mode]["total"].append({"wall_s": frame["wall_s"] + hist["wall_s"]})
@@ -223,11 +270,11 @@ def run(result: Path, events: int = EVENTS, pilot: bool = False) -> None:
         check_pair(output["nominal"], output["full"])
 
     summary = {"runs": measurements, "histogram_sha256": prior_hashes}
-    if not pilot:
+    if not (pilot or initial):
         summary["quality"] = {mode: {leg: check_quality(records) for leg, records in legs.items()}
                               for mode, legs in measurements.items()}
     (result / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    if not pilot and not all(quality["pass"] for legs in summary["quality"].values()
+    if not (pilot or initial) and not all(quality["pass"] for legs in summary["quality"].values()
                              for quality in legs.values()):
         raise typer.Exit(code=2)
 
