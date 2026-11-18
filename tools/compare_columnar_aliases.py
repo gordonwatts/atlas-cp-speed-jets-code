@@ -71,15 +71,25 @@ def main(
     output: Path,
     energy_library: Annotated[Path, typer.Option()],
     chunk: Annotated[int, typer.Option(min=1)] = 512,
+    also_proof: Annotated[list[Path] | None, typer.Option(help="Proven comparison of the same stock fields")] = None,
 ):
     """Check aliases and float energy using the exact C comparison as the first leg."""
     execution = check_execution()
     if output.exists():
         raise FileExistsError(output)
-    raw_proof = proof.read_bytes()
-    report = json.loads(raw_proof)
-    if not report["passed"] or report["entries_compared"] != report["entries_requested"]:
-        raise ValueError("A passed and complete C observer comparison is required")
+    proofs = {}
+    report = None
+    for path in [proof, *(also_proof or [])]:
+        raw_proof = path.read_bytes()
+        checked = json.loads(raw_proof)
+        if not checked["passed"] or checked["entries_compared"] != checked["entries_requested"]:
+            raise ValueError(f"A passed and complete C observer comparison is required: {path}")
+        if report is None:
+            report = checked
+        elif (any(checked[key] != report[key] for key in ("authority", "source_file_uuid", "entries_compared", "states"))
+              or checked["checks"] != report["checks"]):
+            raise ValueError(f"The proof must match the stock file, interval, and directly checked fields: {path}")
+        proofs[str(path.resolve())] = sha256(raw_proof).hexdigest()
     mapping = aliases(report["states"])
     if any(ref not in report["checks"] for refs in mapping.values() for ref in refs):
         raise ValueError("The base comparison omitted a required source field")
@@ -124,8 +134,7 @@ def main(
     with output.open("x", encoding="utf-8") as stream:
         json.dump({
             "passed": failures == 0, "entries": entries, "execution": execution,
-            "authority": report["authority"], "base_comparison": str(proof.resolve()),
-            "base_comparison_sha256": sha256(raw_proof).hexdigest(),
+            "authority": report["authority"], "base_comparisons": proofs,
             "observer_branches": len(diagnostic.checks),
             "complete_branches": len(report["checks"]) + len(diagnostic.checks),
             "comparisons": sum(row["comparisons"] for row in diagnostic.checks.values()),
