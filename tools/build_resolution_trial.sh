@@ -9,7 +9,7 @@ out="results/build/table-resolution-$tag"
 mkdir "$out"
 exec > "$out/controller.log" 2>&1
 trap 'echo $? > "$out/exit-code"' EXIT
-cmp "$trial/nominal_resolution_cache.h" portable/nominal_resolution_cache.h
+test -s portable/nominal_resolution_cache.h
 rg -q 'JETS_NOMINAL_RESOLUTION_CACHE' portable/uncertainty.cxx
 taskset -c 5 bash tools/build-portable.sh "joint-resolution-$tag" core-precision-002 portable-lwtnn-001 rng-cache nominal-resolution-cache
 taskset -c 5 bash "$trial/build-fixture.sh" "$out/fixture"

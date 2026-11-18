@@ -8,6 +8,6 @@ mkdir "$output"
 taskset -c 5 g++ -std=c++20 -O2 -ffp-contract=off -frounding-math -Wall -Wextra -Werror \
   -I"$root/source/correctionlib/rapidjson/include" -I"$root/portable" \
   "$root/portable/histogram.cxx" "$variant/fixture.cxx" -o "$output/nominal-resolution-cache-fixture"
-sha256sum "$variant/nominal_resolution_cache.h" "$variant/fixture.cxx" "$variant/integration.diff" \
+sha256sum "$root/portable/nominal_resolution_cache.h" "$variant/fixture.cxx" "$variant/integration.diff" \
   "$root/portable/histogram.cxx" "$output/nominal-resolution-cache-fixture" > "$output/inputs.sha256"
 ldd "$output/nominal-resolution-cache-fixture" > "$output/ldd.txt"

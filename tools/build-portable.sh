@@ -22,6 +22,7 @@ for choice in "${@:4}"; do
     rng-cache-diagnostics) jets_candidate_defines+=(-DJETS_RNG_CACHE_DIAGNOSTICS) ;;
     large-jmr-match-cache) jets_candidate_defines+=(-DJETS_LARGE_JMR_MATCH_CACHE) ;;
     uncertainty-batch) jets_candidate_defines+=(-DJETS_UNCERTAINTY_BATCH) ;;
+    nominal-resolution-cache) jets_candidate_defines+=(-DJETS_NOMINAL_RESOLUTION_CACHE) ;;
     fast-variable-flow) jets_candidate_defines+=(-DJETS_FAST_VARIABLE_FLOW) ;;
     *) echo "Unknown provider build choice: $choice" >&2; exit 2 ;;
   esac

@@ -4,6 +4,9 @@
 #include "../provider/jet_common.h"
 #include "../provider/jet_smearing.h"
 #include "histogram.h"
+#ifdef JETS_NOMINAL_RESOLUTION_CACHE
+#include "nominal_resolution_cache.h"
+#endif
 
 #include <correction_plugin.h>
 #include <algorithm>
@@ -87,6 +90,9 @@ struct JetUncertaintyModel::Impl {
   float energy_scale, ref_npv, ref_mu;
   bool smear_only_mc, abs_fraction;
   ResolutionRandom random;
+#ifdef JETS_NOMINAL_RESOLUTION_CACHE
+  const std::uint64_t nominal_resolution_identity = portable::nominal_resolution_identity();
+#endif
 
   explicit Impl(const correction::PluginConfig& config) {
     rapidjson::Document p;
@@ -222,7 +228,21 @@ struct JetUncertaintyModel::Impl {
         if(scale==Scale::four_vector) pt_factor=mass_factor=1.0+uncertainty;
         else if(scale==Scale::mass) mass_factor=1.0+uncertainty;
         else {
-          auto nominal=[&](bool mc){return (mc?res_mc:res_data)->getValue(out.p4[0]*energy_scale,std::abs(out.p4[1]));};
+          const auto scalar_nominal=[&](bool mc) {
+            return (mc?res_mc:res_data)->getValue(out.p4[0]*energy_scale,std::abs(out.p4[1]));
+          };
+#ifdef JETS_NOMINAL_RESOLUTION_CACHE
+          portable::ProductionNominalResolutionCache::Query resolution_query;
+          auto nominal=[&](bool mc) {
+            auto& cache = portable::ProductionNominalResolutionCache::local();
+            if (mc)
+              return cache.mc(resolution_query, nominal_resolution_identity, out.p4[0], out.p4[1],
+                              [&] { return scalar_nominal(true); });
+            return cache.data(resolution_query, [&] { return scalar_nominal(false); });
+          };
+#else
+          const auto& nominal=scalar_nominal;
+#endif
           pt_factor=resolution_factor(out.p4[2],uncertainty,pseudo,smear_only_mc,false,random,nominal);
           if(scale==Scale::four_vector_resolution) mass_factor=pt_factor;
         }
