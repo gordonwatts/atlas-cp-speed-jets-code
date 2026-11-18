@@ -80,7 +80,11 @@ def schedule() -> list[Job]:
         if round_index:
             jobs.append(Job(round_index, Scope.combined, "full", "A", anchor=True))
         for position, (scope, mode) in enumerate(groups[round_index:] + groups[:round_index]):
-            for arm in ARM_ORDERS[(round_index + position) % len(ARM_ORDERS)]:
+            if round_index == 0:
+                order = ("ABC", "ACB")[position % 2]
+            else:
+                order = ARM_ORDERS[(round_index + position) % len(ARM_ORDERS)]
+            for arm in order:
                 jobs.append(Job(round_index, scope, mode, arm))
     jobs.append(Job(REPETITIONS, Scope.combined, "full", "A", anchor=True))
     return jobs
@@ -643,10 +647,19 @@ def run(
                 })
                 raise
             receipt.update(launch=launch, completed_unix_ns=time.time_ns())
-            sealed_json(attempt / "receipt.json", receipt)
             if not diagnostic:
-                finished[job] = (attempt, receipt)
-                sealed_json(result / "summary.json", campaign_summary(finished))
+                proposed = {**finished, job: (attempt, receipt)}
+                try:
+                    summary = campaign_summary(proposed)
+                except (ValueError, AssertionError) as error:
+                    receipt.update(classification="diagnostic", guard_failure=str(error))
+                    sealed_json(attempt / "receipt.json", receipt)
+                    raise
+                finished = proposed
+                sealed_json(attempt / "receipt.json", receipt)
+                sealed_json(result / "summary.json", summary)
+            else:
+                sealed_json(attempt / "receipt.json", receipt)
             typer.echo(f"  {receipt['wall_s']['total']:.3f} s ({receipt['classification']})", err=True)
         summary = campaign_summary(finished)
         typer.echo(f"{summary['completed']} of {summary['planned']} jobs accepted in {result}")
