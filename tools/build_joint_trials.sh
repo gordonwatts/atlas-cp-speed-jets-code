@@ -33,6 +33,9 @@ run() {
 run pack taskset -c 5 "$py" -m exporters.pack_eta_jes results/export/portable-001/jets.json "results/export/eta-jes-packed-$trial"
 if [[ -s "results/export/eta-jes-packed-$trial/jets.json" ]]; then
   run partition taskset -c 5 "$py" -m exporters.partition_payload "results/export/eta-jes-packed-$trial/jets.json" "results/export/eta-jes-partition-$trial"
+  if [[ -s "results/export/eta-jes-partition-$trial/manifest.json" ]]; then
+    run scope-index taskset -c 5 "$py" exporters/prepare_scope_index.py "results/export/eta-jes-packed-$trial/jets.json" "results/export/eta-jes-partition-$trial" "results/export/eta-jes-partition-$trial/payload-index.json"
+  fi
 fi
 for variant in baseline bigger flow match; do
   options=(rng-cache)
