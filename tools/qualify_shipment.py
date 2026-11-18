@@ -38,6 +38,8 @@ def main(
     stage: str,
     scope: str = "both",
     jobs: Annotated[int | None, typer.Option(min=1)] = None,
+    production_output: Annotated[Path | None, typer.Option(
+        help="Alternate production journal named production-* inside the qualified output")] = None,
     recheck_of: Annotated[Path | None, typer.Option(help="Completed original production journal")] = None,
     recheck_scope: Annotated[RecheckScope | None, typer.Option()] = None,
     recheck_mode: Annotated[RecheckMode | None, typer.Option()] = None,
@@ -46,6 +48,8 @@ def main(
 ):
     """Run on CPU 3. Each step's own tool writes its detailed immutable receipts."""
     requested = (recheck_of, recheck_scope, recheck_mode, recheck_pair, recheck_output)
+    if production_output is not None and (stage != "time" or any(value is not None for value in requested)):
+        raise typer.BadParameter("--production-output applies to the production time stage; rechecks use --recheck-of")
     recheck_args = []
     if any(value is not None for value in requested):
         if any(value is None for value in requested):
@@ -74,6 +78,12 @@ def main(
              ("overlay", "provider", "payload", "sdk", "bundle", "installation", "partition")}
     output = (ROOT / plan["output"]).resolve()
     production = output / "production"
+    if production_output is not None:
+        production = (ROOT / production_output).resolve()
+        if production.parent != output or not production.name.startswith("production-"):
+            raise typer.BadParameter("Use a production-* journal directly inside the qualified output")
+        if production.exists() and not (production / "campaign.json").is_file():
+            raise typer.BadParameter("An existing production output must contain its campaign.json")
     if recheck_output is not None and (
         recheck_output.is_relative_to(production) or production.is_relative_to(recheck_output)
     ):

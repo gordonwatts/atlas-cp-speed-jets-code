@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "tools/reference"
 sys.path[:0] = [str(REFERENCE), str(ROOT / "framework")]
 from benchmark import (  # noqa: E402
-    CPU, EVENTS, MAX_DEVIATION_FROM_MEDIAN, MODES, REPETITIONS,
+    CPU, EVENTS, MAX_DEVIATION_FROM_MEDIAN, MODES, REPETITIONS, STARTUP_LIBRARY_OBSERVATIONS,
     check_pair, check_quality, release_environment, run_leg,
 )
 from bench_path_b import BUDGET, confirm_scope, verified_library  # noqa: E402
@@ -437,7 +437,8 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
             if not leg["source_mapping_observed"]:
                 raise ValueError(f"Could not verify the source mapping and processing interval in {attempt}")
         else:
-            leg = run_leg(command, environment, attempt, "columnar")
+            leg = run_leg(command, environment, attempt, "columnar",
+                          capture_startup_libraries=context.cohort == Cohort.production)
         counters = verify_columnar(
             job, attempt, leg, inventory, context.source, context.cohort,
             context.core, context.c_provider, context.wheel_members, context.columnar_python,
@@ -1533,6 +1534,8 @@ def run(
         "endpoint_clock": "monotonic wall including startup and output serialization",
         "schedule": [job.details() for job in scheduled],
     }
+    if cohort == Cohort.production:
+        provenance["columnar_startup_library_observations"] = STARTUP_LIBRARY_OBSERVATIONS
     if projections:
         provenance["projected_payloads"] = {scope.value: receipt for scope, receipt in projections.items()}
         # Keep the schema of earlier one-switch production journals.

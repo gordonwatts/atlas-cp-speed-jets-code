@@ -22,6 +22,7 @@ CPU = 3
 REPETITIONS = 4
 MAX_COEFFICIENT_OF_VARIATION = 0.05
 MAX_DEVIATION_FROM_MEDIAN = 0.10
+STARTUP_LIBRARY_OBSERVATIONS = 10
 ROOT_DISCOVERY_COMMANDS = {"bash", "sh", "ls", "coreutils", "g++", "cc1plus", "sed", "ldd"}
 
 
@@ -95,7 +96,8 @@ def sample_workers(pid: int, threads: set[int], cpus: set[str], libraries: set[s
 
 
 def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str, *,
-            event_source: Path | None = None, startup_validator=None) -> dict:
+            event_source: Path | None = None, startup_validator=None,
+            capture_startup_libraries: bool = False) -> dict:
     threads, cpus, children, libraries = set(), set(), set(), set()
     before = sample_activity()
     source_path = str(event_source.resolve(strict=True)) if event_source else None
@@ -111,8 +113,11 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
         sample = 0
         while status is None:
             if sample % 20 == 0:
+                # Short workers can exit before the first regular 500 ms map read.
+                startup = capture_startup_libraries and sample // 20 < STARTUP_LIBRARY_OBSERVATIONS
                 source_opened = sample_workers(worker.pid, threads, cpus, libraries, children, log_path,
-                                               sample % 100 == 0, source_path, source_opened, start_ns)
+                                               startup or sample % 100 == 0,
+                                               source_path, source_opened, start_ns)
             sample += 1
             pid, code, usage = os.wait4(worker.pid, os.WNOHANG)
             if pid:
