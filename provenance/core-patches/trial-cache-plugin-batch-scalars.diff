@@ -1,0 +1,89 @@
+--- a/include/correction.h
++++ b/include/correction.h
+@@ -40,6 +40,8 @@
+     std::string description_;
+     VarType type_;
+ };
++
++namespace detail { class PluginBatchRow; }
+ 
+ // A scalar is owned; numeric columns borrow caller storage for one batch call.
+ // Strides count elements (not bytes). The first pointer may address a reversed view.
+@@ -51,6 +53,7 @@
+   Variable::Type at(size_t index) const;
+   void validate(const Variable& variable, size_t n) const;
+ private:
++  friend class detail::PluginBatchRow;
+   struct Reals { const double* data; size_t size; std::ptrdiff_t stride; };
+   struct Integers { const int64_t* data; size_t size; std::ptrdiff_t stride; };
+   std::variant<Variable::Type, Reals, Integers> data_;
+--- a/src/plugin.cc
++++ b/src/plugin.cc
+@@ -381,14 +381,46 @@
+   state_->node->evaluate_array(values, output, size);
+ }
+ 
++// Prepare row zero in the original column order. Only owned variants are immutable
++// scalars. A numeric view, even with stride zero, can alias writable storage.
++class correction::detail::PluginBatchRow {
++public:
++  PluginBatchRow(const std::vector<BatchInput>& inputs, size_t rows)
++    : values_(inputs.size()) {
++    for (size_t column = 0; column < inputs.size(); ++column)
++      values_[column] = inputs[column].at(0);
++    if (rows == 1) return;
++    varying_.reserve(inputs.size());
++    for (size_t column = 0; column < inputs.size(); ++column) {
++      if (!std::holds_alternative<Variable::Type>(inputs[column].data_))
++        varying_.push_back({&inputs[column], &values_[column]});
++    }
++  }
++  void advance(size_t row) {
++    for (const auto& column : varying_)
++      *column.value = column.input->at(row);
++  }
++  const std::vector<Variable::Type>& values() const { return values_; }
++
++private:
++  struct Column {
++    const BatchInput* input;
++    Variable::Type* value;
++  };
++  std::vector<Variable::Type> values_;
++  std::vector<Column> varying_;
++};
++
+ void PluginNode::evaluate_batch(const std::vector<BatchInput>& inputs, size_t n,
+                                 double* output, size_t output_size) const {
+   if (output_size < n || (n && !output))
+     throw std::invalid_argument("Batch output buffer too small or null");
+-  std::vector<Variable::Type> values(inputs.size());
+-  for (size_t row = 0; row < n; ++row) {
+-    for (size_t j = 0; j < inputs.size(); ++j) values[j] = inputs[j].at(row);
+-    output[row] = evaluate(values);
++  if (!n) return;
++  detail::PluginBatchRow row_values(inputs, n);
++  output[0] = evaluate(row_values.values());
++  for (size_t row = 1; row < n; ++row) {
++    row_values.advance(row);
++    output[row] = evaluate(row_values.values());
+   }
+ }
+ 
+@@ -403,10 +435,12 @@
+   if (!components) throw std::runtime_error("Scalar plugin requires evaluate_batch");
+   if (n > std::numeric_limits<size_t>::max() / components || size < n * components || (n && !output))
+     throw std::invalid_argument("Array batch output buffer too small or size overflows");
+-  std::vector<Variable::Type> values(inputs.size());
+-  for (size_t row = 0; row < n; ++row) {
+-    for (size_t j = 0; j < inputs.size(); ++j) values[j] = inputs[j].at(row);
+-    evaluate_array(values, output + row * components, components);
++  if (!n) return;
++  detail::PluginBatchRow row_values(inputs, n);
++  evaluate_array(row_values.values(), output, components);
++  for (size_t row = 1; row < n; ++row) {
++    row_values.advance(row);
++    evaluate_array(row_values.values(), output + row * components, components);
+   }
+ }
+ void ExtensionNode::evaluate_batch_array(const std::vector<BatchInput>& inputs, size_t n,
