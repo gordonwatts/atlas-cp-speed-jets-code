@@ -68,18 +68,18 @@ def make_index(canonical: Path, partition_manifest: Path, output: Path) -> None:
         stream.write("\n")
 
 
-def copy_range(source, output, first: int, stop: int) -> None:
+def copy_range(source, emit, first: int, stop: int) -> None:
     source.seek(first)
     remaining = stop - first
     while remaining:
         data = source.read(min(BLOCK, remaining))
         if not data:
             raise EOFError("Canonical payload ended inside an indexed span")
-        output.write(data)
+        emit(data)
         remaining -= len(data)
 
 
-def materialize(canonical: Path, index: Path, scope: str, output: Path) -> None:
+def materialize(canonical: Path, index: Path, scope: str, output: Path) -> dict:
     """Copy the selected canonical bytes without parsing the unused correction nodes."""
     if scope not in SCOPES:
         raise ValueError(f"Compact payload applies to one collection, got {scope!r}")
@@ -103,13 +103,25 @@ def materialize(canonical: Path, index: Path, scope: str, output: Path) -> None:
     if reconstructed_size != subset["bytes"]:
         raise ValueError("Indexed compact payload dimensions disagree")
 
+    digest = hashlib.sha256()
     with canonical.open("rb") as source:
         if source.seek(0, 2) != size:
             raise ValueError("The canonical payload size differs from the index")
         with output.open("xb") as destination:
-            copy_range(source, destination, prefix_first, prefix_stop)
+            def emit(data: bytes) -> None:
+                if destination.write(data) != len(data):
+                    raise OSError("Incomplete write to compact CorrectionSet")
+                digest.update(data)
+
+            copy_range(source, emit, prefix_first, prefix_stop)
             for row, (first, stop) in enumerate(spans):
                 if row:
-                    destination.write(b",")
-                copy_range(source, destination, first, stop)
-            copy_range(source, destination, suffix_first, suffix_stop)
+                    emit(b",")
+                copy_range(source, emit, first, stop)
+            copy_range(source, emit, suffix_first, suffix_stop)
+            byte_count = destination.tell()
+    identity = {"bytes": byte_count, "sha256": digest.hexdigest()}
+    if any(subset[field] != value for field, value in identity.items()):
+        output.unlink()
+        raise ValueError("Written compact CorrectionSet differs from its verified byte extent or digest")
+    return identity

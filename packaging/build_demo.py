@@ -73,7 +73,9 @@ def use_compact_payload(source: str) -> str:
         '            # Keep the canonical bundle once. Load a temporary file with the matching nodes.\n'
         '            with TemporaryDirectory(prefix="atlas-jet-payload-") as scratch:\n'
         '                projected = Path(scratch) / "jets.json"\n'
-        '                materialize(payload, DATA / "payload-index.json", scope.value, projected)\n'
+        '                written = materialize(payload, DATA / "payload-index.json", scope.value, projected)\n'
+        '                typer.echo("Payload materialized SHA-256: " + written["sha256"])\n'
+        '                typer.echo("Payload materialized bytes: " + str(written["bytes"]))\n'
         '                nodes, buffers = load_corrections(provider, projected)\n'
         '        else:\n'
         '            nodes, buffers = load_corrections(provider, payload)',
