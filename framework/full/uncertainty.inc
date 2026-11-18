@@ -23,9 +23,14 @@
             "large_r_truth_label_available", "calo_pt", "calo_eta", "calo_phi", "calo_m", "calo_available",
             "systematic"};
         const bool small = m_jetDef == "AntiKt4EMPFlow";
-        static const auto& small_call = jets::framework::bind("small_uncertainty", 8, inputs_names);
-        static const auto& large_call = jets::framework::bind("large_uncertainty", 8, inputs_names);
-        const auto& call = small ? small_call : large_call;
+        const auto& call = [&]() -> const jets::framework::CorrectionCall& {
+            if (small) {
+                static const auto& small_call = jets::framework::bind("small_uncertainty", 8, inputs_names);
+                return small_call;
+            }
+            static const auto& large_call = jets::framework::bind("large_uncertainty", 8, inputs_names);
+            return large_call;
+        }();
 
         Values inputs;
         inputs.reserve(18);
