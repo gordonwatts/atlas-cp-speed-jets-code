@@ -21,6 +21,7 @@ public:
   int GetFirst() const noexcept { return first_; }
   int GetLast() const noexcept { return last_; }
   bool has_range() const noexcept { return restricted_; }
+  bool has_variable_edges() const noexcept { return !edges_.empty(); }
 
   int FindFixBin(double x) const noexcept;
   int FindBin(double x) const noexcept { return FindFixBin(x); }

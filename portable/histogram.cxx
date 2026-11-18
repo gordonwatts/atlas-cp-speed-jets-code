@@ -163,11 +163,20 @@ double interpolate_3d(const Histogram& hist, std::array<double, 3> xyz, bool leg
 }
 
 double uncertainty_coordinate(const Axis& axis, double value) {
-  const int bin = axis.FindFixBin(value);
-  if (bin == 0) return axis.GetBinLowEdge(1);
-  if (bin > axis.GetNbins())
-    return (1. - 1.e-3) * axis.GetBinWidth(axis.GetNbins()) + axis.GetBinLowEdge(axis.GetNbins());
-  return value;
+#ifdef JETS_FAST_VARIABLE_FLOW
+  if (axis.has_variable_edges()) {
+    // Sorted variable edges, including duplicates, give an interior bin
+    // for every value in [xmin, xmax). Only flow classification is needed.
+    if (value < axis.GetXmin()) return axis.GetBinLowEdge(1);
+    if (value < axis.GetXmax()) return value;
+  } else
+#endif
+  {
+    const int bin = axis.FindFixBin(value);
+    if (bin == 0) return axis.GetBinLowEdge(1);
+    if (bin <= axis.GetNbins()) return value;
+  }
+  return (1. - 1.e-3) * axis.GetBinWidth(axis.GetNbins()) + axis.GetBinLowEdge(axis.GetNbins());
 }
 
 }  // namespace
