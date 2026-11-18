@@ -193,6 +193,7 @@ def main(
     histogram_a: Annotated[Path | None, typer.Option("--histogram-a")] = None,
     histogram_c: Annotated[Path | None, typer.Option("--histogram-c")] = None,
     distributions: Annotated[Path | None, typer.Option(help="Write independent endpoint distributions in a new directory")] = None,
+    energy_library: Annotated[Path | None, typer.Option(help="Verified native four-vector energy helper for spectra")] = None,
     reuse_nominal_nnjvt_update: Annotated[bool, typer.Option(
         "--reuse-nominal-nnjvt-update", help="Validate the exact-input NNJvt update reuse trial",
     )] = False,
@@ -215,6 +216,8 @@ def main(
     plan = branch_plan(selected, mode, diagnostics=True, stage=stage)
 
     recorder = None
+    if energy_library is not None and distributions is None:
+        raise typer.BadParameter("Energy spectra require --distributions")
     if distributions is not None:
         if mode == Mode.stored or stage != "final":
             raise typer.BadParameter("Endpoint distributions require a calibrated final comparison")
@@ -222,7 +225,7 @@ def main(
             raise FileExistsError(distributions)
         from columnar.distributions import EndpointDistributions
 
-        recorder = EndpointDistributions(states, WEIGHT_DIRECTIONS, VALID)
+        recorder = EndpointDistributions(states, WEIGHT_DIRECTIONS, VALID, energy_library)
 
     nodes = buffers = None
     if mode != Mode.stored and stage not in ("stored", "const"):
@@ -241,7 +244,10 @@ def main(
             raise ValueError("Reference ends before the requested comparison interval")
         raw = resolve_branches(src, plan)
         required = set(expected) | set(EVENT_KEYS)
-        absent = required.difference(ref.keys())
+        stock_keys = set(ref.keys())
+        if recorder is not None:
+            required.update(recorder.observer_branches(stock_keys))
+        absent = required.difference(stock_keys)
         if absent:
             raise ValueError(f"Reference does not expose {len(absent)} required branches: {sorted(absent)[:10]}")
 

@@ -1,6 +1,5 @@
 """Prove the extra stock output names from fields already checked against C."""
 
-from ctypes import CDLL, c_size_t
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -11,6 +10,7 @@ CHECKOUT = Path(__file__).resolve().parents[1]
 if str(CHECKOUT) not in sys.path:
     sys.path.insert(0, str(CHECKOUT))
 
+from columnar.distributions import Energy, EnergyDistributions, observer_availability
 from columnar.inputs import EVENT_KEYS, flatten, open_root
 from columnar.jets import WEIGHT_DIRECTIONS, check_execution
 from tools.compare_columnar import Diagnostics
@@ -49,97 +49,6 @@ def aliases(states):
                 result[f"{prefix}_eta"] = (leaf("p4eta"),)
                 result[f"{prefix}_phi"] = (leaf("p4phi"),)
     return result
-
-
-class Energy:
-    def __init__(self, path):
-        self.library = CDLL(str(path.resolve(strict=True)))
-        self.evaluate = self.library.columnar_alias_energy
-        self.evaluate.restype = None
-        f32 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS")
-        self.evaluate.argtypes = [c_size_t, f32, f32, f32, f32, f32]
-
-    def __call__(self, p4):
-        coordinates = [np.ascontiguousarray(flatten(values), dtype=np.float32) for values in p4]
-        output = np.empty_like(coordinates[0])
-        self.evaluate(len(output), *coordinates, output)
-        return output
-
-
-class EnergyDistributions:
-    def __init__(self, states):
-        from columnar.distributions import Distribution, Observable
-
-        if not states:
-            raise ValueError("Energy spectra require a calibrated small-R observer comparison")
-        edges = (0, 20, 30, 40, 60, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000,
-                 3000, 4500, 7000, 10000)
-        self.states = states
-        self.index = {f"sr_e_{name}": i for i, name in enumerate(states)}
-        self.distribution = Distribution(Observable("e", "GeV", edges, 1000), states)
-        self.ranges = np.broadcast_to([np.inf, -np.inf], (len(states), 2, 2)).copy()
-
-    def fill(self, name, stock, direct, same_counts):
-        index = self.index[name]
-        self.distribution.fill(index, stock, direct, same_counts)
-        for side, values in enumerate((stock, direct)):
-            finite = values[np.isfinite(values)]
-            if finite.size:
-                current = self.ranges[index, side]
-                current[0] = min(current[0], float(finite.min()) / 1000)
-                current[1] = max(current[1], float(finite.max()) / 1000)
-
-    def write(self, output, entries, sources, absence, proof):
-        from columnar.distributions import RESIDUAL
-
-        output.mkdir()
-        counter = self.distribution
-        arrays = {"entries": np.asarray(entries), "sr_states": np.asarray(self.states),
-                  "paired_residual_edges": np.asarray(RESIDUAL)}
-        metadata = counter.persist("sr_energy", arrays, self.states)
-        arrays["sr_energy_stock_finite_range"] = self.ranges[:, 0]
-        arrays["sr_energy_direct_finite_range"] = self.ranges[:, 1]
-        samples_per_side_equal = np.array_equal(counter.stock.sum(axis=1) + counter.stock_nan,
-                                                counter.direct.sum(axis=1) + counter.direct_nan)
-        passed = (
-            samples_per_side_equal
-            and np.array_equal(counter.stock, counter.direct)
-            and np.array_equal(counter.stock_nan, counter.direct_nan)
-            and np.array_equal(self.ranges[:, 0], self.ranges[:, 1])
-            and not (np.any(counter.unpaired_chunks) or np.any(counter.exact_mismatches))
-        )
-        with (output / "distributions.npz").open("xb") as stream:
-            np.savez(stream, **arrays)
-        with (output / "metadata.json").open("x", encoding="utf-8") as stream:
-            json.dump({
-                "passed": passed,
-                "entries": entries,
-                "kinematic_states": self.states,
-                "histogram": metadata,
-                "axes": {"counts": ["state", "bin"], "finite_range": ["state", "minimum_then_maximum"]},
-                "bin_convention": "underflow, half-open [edge[i], edge[i+1]) bins, overflow; NaN counted separately",
-                "authority_and_candidate": (
-                    "A uses the persisted float energy. C reconstructs float energy using the native operation "
-                    "on the already-proven exact per-object C four-vector representation."
-                ),
-                "proofs": sources,
-                "observer_alias_proof": str(proof.resolve()),
-                "stock_availability": absence,
-            }, stream, indent=2, allow_nan=False)
-            stream.write("\n")
-        return {"path": str(output.resolve()), "passed": passed, "states": len(self.states),
-                "values_per_side": int(counter.stock.sum() + counter.stock_nan.sum())}
-
-
-def observer_availability(keys):
-    return {
-        "large_r_energy": {"persisted": any(name == "lr_e" or name.startswith("lr_e_") for name in keys),
-                           "alternative": "per-object pt, eta, phi and mass are persisted and verified"},
-        "large_r_unmodified_auxiliary_branches": {
-            field: sum(name.startswith(f"lr_{field}_") for name in keys)
-            for field in ("d2", "tau1", "tau2", "tau3", "split12", "split23", "truthLabel")
-        },
-    }
 
 
 def main(
@@ -208,7 +117,7 @@ def main(
                     if len(refs) == 4:
                         for other in source_fields[1:]:
                             np.testing.assert_array_equal(counts, ak.to_numpy(ak.num(other, axis=1)))
-                        values = energy(source_fields)
+                        values = energy(flatten(field) for field in source_fields)
                         if energy_counts is not None:
                             stored_counts = ak.to_numpy(ak.num(data[name], axis=1))
                             energy_counts.fill(name, flatten(data[name]), values, np.array_equal(stored_counts, counts))
