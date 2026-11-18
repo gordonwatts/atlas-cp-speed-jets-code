@@ -45,7 +45,8 @@ def sample_activity() -> dict:
 
 
 def sample_workers(pid: int, threads: set[int], cpus: set[str], libraries: set[str],
-                   descendants: set[tuple], log: Path, capture_libraries: bool) -> None:
+                   descendants: set[tuple], log: Path, capture_libraries: bool,
+                   source_path: str | None, source_opened: bool, start_ns: int) -> bool:
     root = Path("/proc") / str(pid)
     try:
         raw_status = (root / "status").read_text()
@@ -60,32 +61,45 @@ def sample_workers(pid: int, threads: set[int], cpus: set[str], libraries: set[s
             threads.add(thread_count)
         if affinity is not None:
             cpus.add(affinity)
-        if capture_libraries:
+        if capture_libraries or (source_path and not source_opened):
             for line in (root / "maps").read_text().splitlines():
                 parts = line.split(None, 5)
-                if len(parts) == 6 and parts[-1].startswith("/") and ".so" in parts[-1]:
+                if len(parts) != 6:
+                    continue
+                if capture_libraries and parts[-1].startswith("/") and ".so" in parts[-1]:
                     libraries.add(parts[-1])
-        pending = (root / "task" / str(pid) / "children").read_text().split()
+                if parts[-1] == source_path:
+                    source_opened = True
+        pending = [(pid, child) for child in (root / "task" / str(pid) / "children").read_text().split()]
         if not pending:
-            return
-        during_events = b"Processing events " in log.read_bytes()
-        for child in pending:
+            return source_opened
+        during_events = source_opened or b"Processing events " in log.read_bytes()
+        for parent, child in pending:
             child_root = Path("/proc") / child
             try:
                 status = dict(line.split(":\t", 1) for line in
                               (child_root / "status").read_text().splitlines() if ":\t" in line)
+                argv = tuple(
+                    os.fsdecode(arg) for arg in (child_root / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+                ) if source_path else ()
+                elapsed_ns = time.monotonic_ns() - start_ns if source_path else 0
                 descendants.add((int(child), status["Name"], status["Cpus_allowed_list"],
-                                 int(status["Threads"]), during_events))
-                pending.extend((child_root / "task" / child / "children").read_text().split())
+                                 int(status["Threads"]), during_events, parent, argv, elapsed_ns))
+                pending.extend((int(child), descendant) for descendant in
+                               (child_root / "task" / child / "children").read_text().split())
             except (FileNotFoundError, ProcessLookupError):
-                descendants.add((int(child), "<exited>", None, 0, during_events))
+                descendants.add((int(child), "<exited>", None, 0, during_events, parent, (), 0))
     except (FileNotFoundError, ProcessLookupError):
-        return
+        pass
+    return source_opened
 
 
-def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str) -> dict:
+def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str, *,
+            event_source: Path | None = None, startup_validator=None) -> dict:
     threads, cpus, children, libraries = set(), set(), set(), set()
     before = sample_activity()
+    source_path = str(event_source.resolve(strict=True)) if event_source else None
+    source_opened = False
     log_path = directory / f"{label}.log"
     with log_path.open("wb") as log:
         start_ns = time.monotonic_ns()
@@ -96,7 +110,8 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
         sample = 0
         while status is None:
             if sample % 20 == 0:
-                sample_workers(worker.pid, threads, cpus, libraries, children, log_path, sample % 100 == 0)
+                source_opened = sample_workers(worker.pid, threads, cpus, libraries, children, log_path,
+                                               sample % 100 == 0, source_path, source_opened, start_ns)
             sample += 1
             pid, code, usage = os.wait4(worker.pid, os.WNOHANG)
             if pid:
@@ -122,10 +137,12 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
         "threads_seen": sorted(threads),
         "cpus_seen": sorted(cpus),
         "descendant_observations": [
-            {"pid": pid, "comm": name, "cpu": affinity, "threads": count, "during_events": in_events}
-            for pid, name, affinity, count, in_events in sorted(children)
+            {"pid": pid, "comm": name, "cpu": affinity, "threads": count, "during_events": in_events,
+             "parent_pid": parent, "argv": argv, "observed_elapsed_ns": elapsed_ns}
+            for pid, name, affinity, count, in_events, parent, argv, elapsed_ns in sorted(children)
         ],
         "libraries": sorted(libraries),
+        "source_mapping_observed": source_opened if event_source else None,
         "guest_before": before,
         "guest_after": after,
     }
@@ -134,10 +151,9 @@ def run_leg(command: list[str], env: dict[str, str], directory: Path, label: str
         raise RuntimeError(f"{label} exited with {status}; see {directory}")
     unexpected_children = [
         child for child in result["descendant_observations"]
-        if label != "framework" or child["during_events"]
-        or child["comm"] not in ROOT_DISCOVERY_COMMANDS | {"<exited>"}
-        or child["cpu"] not in {str(CPU), None}
-        or child["threads"] > 1
+        if child["during_events"] or child["cpu"] not in {str(CPU), None} or child["threads"] > 1
+        or (not (label == "framework" and child["comm"] in ROOT_DISCOVERY_COMMANDS | {"<exited>"})
+            and not (startup_validator and startup_validator(child, result["descendant_observations"])))
     ]
     if threads != {1} or cpus != {str(CPU)} or unexpected_children:
         raise RuntimeError(f"{label} failed the one-CPU/one-thread check; see {directory}")

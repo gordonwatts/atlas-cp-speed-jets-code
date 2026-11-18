@@ -226,6 +226,37 @@ def verify_framework(job: Job, attempt: Path, receipt: dict, inventory: dict,
     verified_library(receipt, core, bool(required))
 
 
+def faithful_startup_probe(child: dict, family: list[dict], interpreter: Path) -> bool:
+    # Exact command strings observed with the release ROOT library under GDB.
+    sed_program = ("/^.include/,$" + "{", r"/^ \/.*++/p", "}")
+    compiler = ("g++", "-xc++", "-E", "-v", "/dev/null")
+    filter_command = ("sed", "-n", "-e", sed_program[0], "-e", sed_program[1], "-e", sed_program[2])
+    quoted_filter = "sed -n " + " ".join(f"-e '{sentence}'" for sentence in sed_program)
+    shell_commands = {
+        "LD_DEBUG=libs LD_PRELOAD=DOESNOTEXIST ls 2>&1",
+        "LC_ALL=C " + " ".join(compiler) + " 2>&1 | " + quoted_filter,
+        f"ldd '{interpreter}'",
+    }
+
+    def known_command(row):
+        args = tuple(row["argv"])
+        if row["during_events"] or not args:
+            return False
+        tool = Path(args[0]).name
+        if tool in {"sh", "bash"} and args[1:-1] in {("-c",), ("-c", "--")}:
+            return " ".join(args[-1].split()) in shell_commands
+        return ((tool, *args[1:]) in {compiler, filter_command, ("ldd", str(interpreter))}
+                or args[1:] == ("/usr/bin/ldd", str(interpreter)) and tool in {"bash", "sh"})
+
+    if known_command(child):
+        return True
+    # Only these leaves of an identified discovery subprocess may be sampled.
+    allowed_leaves = {"cc1plus", "ls", "coreutils", "ld-linux-x86-64", "<exited>"}
+    if child["comm"] not in allowed_leaves:
+        return False
+    return any(known_command(row) for row in family if row["pid"] in {child["parent_pid"], child["pid"]})
+
+
 def verify_columnar(job: Job, attempt: Path, receipt: dict, inventory: dict,
                     source: dict, cohort: Cohort, core: Path, provider: Path | None,
                     wheel_members: dict) -> dict:
@@ -314,7 +345,14 @@ def execute(job: Job, attempt: Path, context: Context, inventory: dict,
         environment = dict(context.columnar_env)
         if diagnostic and context.cohort == Cohort.production:
             environment["ATLAS_JET_LIBRARY_AUDIT"] = str(attempt / "wheel-runtime.json")
-        leg = run_leg(command, environment, attempt, "columnar")
+        if context.cohort == Cohort.faithful and job.mode != "stored":
+            interpreter = context.columnar_python.resolve()
+            leg = run_leg(command, environment, attempt, "columnar", event_source=context.input_file,
+                          startup_validator=lambda child, family: faithful_startup_probe(child, family, interpreter))
+            if not leg["source_mapping_observed"]:
+                raise ValueError(f"Could not verify the source mapping and processing interval in {attempt}")
+        else:
+            leg = run_leg(command, environment, attempt, "columnar")
         counters = verify_columnar(
             job, attempt, leg, inventory, context.source, context.cohort,
             context.core, context.c_provider, context.wheel_members,
@@ -597,13 +635,18 @@ def run(
         raise ValueError("Start the timing controller outside the converted framework environment")
     columnar_env = clean_environment()
     if cohort == Cohort.faithful:
+        columnar_env = dict(framework_env)
+        for key in ("PYTHONHOME", "PYTHONPATH"):
+            columnar_env.pop(key, None)
         columnar_env["LD_LIBRARY_PATH"] = f"{sdk / 'lib'}:{framework_env['LD_LIBRARY_PATH']}"
 
     inventory = json.loads(INVENTORY.read_text())
     specification = json.loads(SPECIFICATION.read_text())
+    controller_sources = (
+        ROOT / "tools/benchmark_campaign.py", REFERENCE / "benchmark.py", ROOT / "framework/bench_path_b.py",
+    )
     identity_paths = [
-        ROOT / "tools/benchmark_campaign.py", REFERENCE / "benchmark.py", REFERENCE / "workflow.py",
-        REFERENCE / "setup.sh", ROOT / "framework/bench_path_b.py", INVENTORY, SPECIFICATION,
+        REFERENCE / "workflow.py", REFERENCE / "setup.sh", INVENTORY, SPECIFICATION,
         source_verification, provider, payload, core, columnar_python, columnar_script,
         *libraries.values(), *sorted((ROOT / "config").glob("jets-a*.yaml")),
         *sorted((ROOT / "config").glob("jets-stored*.yaml")),
@@ -633,10 +676,23 @@ def run(
         require_no_live_attempt(result)
         campaign = result / "campaign.json"
         if campaign.is_file():
-            if json.loads(campaign.read_text()) != provenance:
+            original = json.loads(campaign.read_text())
+            # Earlier journals included supervising code in the input artifacts.
+            # Keep each controller revision in its own invocation receipt.
+            for path in controller_sources:
+                original["identity_sha256"].pop(str(path), None)
+            if original != provenance:
                 raise ValueError(f"Configuration or artifact identity changed for {result}")
         else:
             sealed_json(campaign, provenance)
+        controllers = result / "controllers"
+        controllers.mkdir(exist_ok=True)
+        controller = controllers / f"{time.time_ns()}-{os.getpid()}.json"
+        sealed_json(controller, {
+            "source_sha256": {str(path): sha256(path) for path in controller_sources},
+            "columnar_runtime": {key: columnar_env[key] for key in
+                                 ("PATH", "ROOTSYS", "ROOT_INCLUDE_PATH", "LD_LIBRARY_PATH") if key in columnar_env},
+        })
         finished = {
             job: accepted for job in scheduled
             if (accepted := selected_attempt(result / job.key)) is not None
@@ -656,7 +712,7 @@ def run(
             typer.echo(f"{cohort.value} {job.key} {attempt.name}", err=True)
             launch = {"unix_ns": time.time_ns(), "monotonic_ns": time.monotonic_ns(),
                       "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
-            sealed_json(attempt / "job.json", {**job.details(), "launch": launch})
+            sealed_json(attempt / "job.json", {**job.details(), "launch": launch, "controller": str(controller)})
             try:
                 receipt = execute(job, attempt, context, inventory, specification, diagnostic)
             except Exception as error:
