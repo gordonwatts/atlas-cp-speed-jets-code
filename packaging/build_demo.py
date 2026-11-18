@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from typing import Annotated
 import zipfile
 
 import typer
@@ -45,7 +46,41 @@ def replace_once(source: str, before: str, after: str) -> str:
     return source.replace(before, after, 1)
 
 
-def build_visible_script(wheel: Path, version: str, output: Path) -> None:
+def use_compact_payload(source: str) -> str:
+    source = replace_once(source, "from pathlib import Path\n",
+                          "from pathlib import Path\nfrom tempfile import TemporaryDirectory\n")
+    source = replace_once(
+        source, "from atlas_jet_demo.runtime import",
+        "from atlas_jet_demo.payload_ranges import materialize\nfrom atlas_jet_demo.runtime import",
+    )
+    source = replace_once(
+        source, "    scope: Scope = Scope.both,\n",
+        '    compact_payload: Annotated[bool, typer.Option(\n'
+        '        "--compact-payload", help="Load only the selected collection from the packaged payload",\n'
+        '    )] = False,\n'
+        '    scope: Scope = Scope.both,\n',
+    )
+    source = replace_once(
+        source, '    payload = payload or DATA / "jets.json"',
+        '    canonical = DATA / "jets.json"\n'
+        '    if compact_payload and payload is not None and payload.resolve() != canonical.resolve():\n'
+        '        raise typer.BadParameter("--compact-payload requires the bundled CorrectionSet")\n'
+        '    payload = payload or canonical',
+    )
+    return replace_once(
+        source, "        nodes, buffers = load_corrections(provider, payload)",
+        '        if compact_payload and scope.value in ("small", "large"):\n'
+        '            # Keep the canonical bundle once. Load a temporary file with the matching nodes.\n'
+        '            with TemporaryDirectory(prefix="atlas-jet-payload-") as scratch:\n'
+        '                projected = Path(scratch) / "jets.json"\n'
+        '                materialize(payload, DATA / "payload-index.json", scope.value, projected)\n'
+        '                nodes, buffers = load_corrections(provider, projected)\n'
+        '        else:\n'
+        '            nodes, buffers = load_corrections(provider, payload)',
+    )
+
+
+def build_visible_script(wheel: Path, version: str, output: Path, compact: bool = False) -> None:
     source = (CHECKOUT / "columnar/jets.py").read_text()
     source = replace_once(source, "# dependencies = [", f'# dependencies = [\n#   "correctionlib=={version}",')
     source = replace_once(
@@ -95,6 +130,8 @@ def build_visible_script(wheel: Path, version: str, output: Path) -> None:
         '    if mode != Mode.stored:\n        audit_runtime()\n    with output.open("xb") as stream:\n'
         "        np.savez(stream, **results)"
     )
+    if compact:
+        source = use_compact_payload(source)
     compile(source, output.as_posix(), "exec")
     output.write_text(source)
 
@@ -217,6 +254,7 @@ def build(
     license_dir: Path,
     patchelf: Path,
     variant: str = "atlasjets1",
+    scope_index: Annotated[Path | None, typer.Option(help="Include the index for opt-in compact loading")] = None,
 ) -> None:
     """Assemble a local patched-precision CorrectionLib wheel and a visible runnable script."""
     if re.fullmatch(r"atlasjets\d+", variant) is None:
@@ -224,6 +262,11 @@ def build(
     output = output.resolve()
     provider = provider.resolve(strict=True)
     payload = payload.resolve(strict=True)
+    payload_identity = identify(payload)
+    if scope_index is not None:
+        layout = json.loads(scope_index.read_text())
+        if layout.get("format") != 1 or layout["canonical"] != payload_identity:
+            raise ValueError("Scope index does not describe the bundled canonical CorrectionSet")
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix="stage-", dir=output) as temporary:
         stage = Path(temporary)
@@ -268,11 +311,14 @@ def build(
             (CHECKOUT / "config/jet-histogram.json", data / "jet-histogram.json"),
         ):
             shutil.copyfile(origin, dest)
+        if scope_index is not None:
+            shutil.copyfile(scope_index, data / "payload-index.json")
+            shutil.copyfile(CHECKOUT / "exporters/payload_ranges.py", assets / "payload_ranges.py")
         build_identity = {
             "tag": NATIVE_TAG,
             "original_wheel": {"name": base_wheel.name, **identify(base_wheel)},
             "provider": {"name": provider.name, **identify(provider)},
-            "payload": identify(payload),
+            "payload": payload_identity,
             "payload_provenance": identify(provenance),
             "compiler_inputs": {name: identify(compiler_dir / name) for name in BUNDLED_COMPILER},
             "columnar_source": identify(CHECKOUT / "columnar/jets.py"),
@@ -281,10 +327,13 @@ def build(
             "git_commit": subprocess.check_output(["git", "-C", str(CHECKOUT), "rev-parse", "HEAD"],
                                                  text=True).strip(),
         }
+        if scope_index is not None:
+            build_identity["scope_index"] = identify(scope_index)
+            build_identity["scope_projector"] = identify(assets / "payload_ranges.py")
         (data / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
         wheel = output / f"correctionlib-{version}-{NATIVE_TAG}.whl"
         script = output / "jets_demo.py"
-        build_visible_script(wheel, version, script)
+        build_visible_script(wheel, version, script, compact=scope_index is not None)
         pack(stage, relocated, wheel)
 
     (output / "bundle.json").write_text(json.dumps({
