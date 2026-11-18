@@ -23,11 +23,14 @@ def source_receipts(value):
 def main(provenance: Path, wheel: Path, output: Path):
     sources = json.loads(provenance.read_text())["sources"]
     files = {}
+    evidence = {}
     for stage, record in sources.items():
         for receipt in source_receipts(record):
             path = Path(receipt["resolved_path"]).resolve(strict=True)
-            item = files.setdefault(str(path), {
-                "path": str(path), "logical_name": receipt.get("path_resolver_name", receipt.get("logical_path")),
+            logical = receipt.get("path_resolver_name", receipt.get("logical_path"))
+            destination = evidence if logical in {"configured state contract", "Path A initialized tools"} else files
+            item = destination.setdefault(str(path), {
+                "path": str(path), "logical_name": logical,
                 "sha256": receipt["sha256"], "bytes": receipt["bytes"], "stages": [],
             })
             if (path.stat().st_size, item["sha256"], item["bytes"]) != (
@@ -54,6 +57,7 @@ def main(provenance: Path, wheel: Path, output: Path):
         "source": {"method": "Distinct resolved files consumed by the included original configurations; ROOT byte counts include all keys in each required container.",
                    "files": sorted(files.values(), key=lambda record: record["path"]),
                    "file_count": len(files), "total_bytes": sum(totals.values()), "by_category_bytes": dict(totals)},
+        "exporter_evidence_only": sorted(evidence.values(), key=lambda record: record["path"]),
         "wheel": {"path": str(wheel.resolve()), "bytes": wheel.stat().st_size, "sha256": wheel_sha,
                   "members": members, "method": "ZIP member sizes exclude archive directory/header overhead."},
     }
