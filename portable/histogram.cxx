@@ -197,6 +197,27 @@ Axis::Axis(int bins, double low, double high, std::vector<double> edges,
        !std::is_sorted(edges_.begin(), edges_.end()) ||
        !std::all_of(edges_.begin(), edges_.end(), [](double edge) { return std::isfinite(edge); })))
     throw std::invalid_argument("invalid histogram variable edges");
+#ifdef JETS_VARIABLE_AXIS_INDEX
+  constexpr int minimum_indexed_bins = 24;
+  if (!edges_.empty() && bins_ >= minimum_indexed_bins &&
+      bins_ <= std::numeric_limits<std::uint16_t>::max()) {
+    const double span = high_ - low_;
+    const double minimum_span = coarse_intervals_ / std::numeric_limits<double>::max();
+    if (span > minimum_span) {
+      coarse_scale_ = coarse_intervals_ / span;
+      coarse_bounds_.reserve(coarse_intervals_ + 1);
+      const double width = span / coarse_intervals_;
+      // Exclude the final edge from the search: its index is the sentinel.
+      const auto final_edge = edges_.end() - 1;
+      for (int interval = 0; interval < coarse_intervals_; ++interval) {
+        const double split = low_ + width * interval;
+        const auto boundary = std::lower_bound(edges_.begin(), final_edge, split);
+        coarse_bounds_.push_back(static_cast<std::uint16_t>(boundary - edges_.begin()));
+      }
+      coarse_bounds_.push_back(static_cast<std::uint16_t>(bins_));
+    }
+  }
+#endif
   if (range) {
     const auto [first, last] = *range;
     if (first <= last && last >= 0 && first <= bins + 1 && (first || last)) {
@@ -211,7 +232,25 @@ bool Axis::variable_interior(int bin) const noexcept {
 }
 
 int Axis::variable_bin(double x) const noexcept {
-  const auto edge = std::lower_bound(edges_.begin(), edges_.end(), x);
+  auto first = edges_.begin();
+  auto end = edges_.end();
+#ifdef JETS_VARIABLE_AXIS_INDEX
+  if (!coarse_bounds_.empty()) {
+    // The arithmetic estimate may round across a split. The comparisons
+    // establish the exact lower_bound interval before limiting the search.
+    const auto interval = static_cast<int>(
+        std::min(static_cast<double>(coarse_intervals_ - 1), (x - low_) * coarse_scale_));
+    const auto lower = coarse_bounds_[interval];
+    const auto upper = coarse_bounds_[interval + 1];
+    // Strict on the left so an equal edge (including a repeat or signed
+    // zero) remains visible. The right edge can serve as a search sentinel.
+    if ((!lower || edges_[lower - 1] < x) && !(edges_[upper] < x)) {
+      first += lower;
+      end = edges_.begin() + upper;
+    }
+  }
+#endif
+  const auto edge = std::lower_bound(first, end, x);
   return static_cast<int>(edge - edges_.begin()) + (edge != edges_.end() && *edge == x);
 }
 

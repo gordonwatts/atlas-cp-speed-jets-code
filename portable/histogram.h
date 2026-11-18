@@ -3,6 +3,7 @@
 #include <rapidjson/document.h>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -44,6 +45,11 @@ private:
   int first_;
   int last_;
   bool restricted_;
+#ifdef JETS_VARIABLE_AXIS_INDEX
+  static constexpr int coarse_intervals_ = 64;
+  double coarse_scale_ = 0;
+  std::vector<std::uint16_t> coarse_bounds_;
+#endif
 };
 
 class Histogram {
